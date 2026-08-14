@@ -9,7 +9,7 @@
 ## 五阶段管线
 
 ```
-1. 检索    豆包搜索按分层词表跑 22 条 query（A/B 层固定 21 + C 层轮换 1）
+1. 检索    豆包搜索按分层词表跑 24 条 query（固定 22 + C 层长尾词轮换 1 + D 层意图词轮换 1）
               ↓  只保留带一手原文 URL 的候选，按 URL 跨查询去重
 2. 去重    对照 data/seen.json，跳过已推送；识别后续公告转入更新流
               ↓
@@ -32,7 +32,7 @@
 | 路径 | 说明 |
 |---|---|
 | `SKILL.md` | 管线定义。含四级降级抓取策略与附件提取的机械步骤 |
-| `references/keywords.md` | A/B/C 分层词表、每日 22 条 Query 清单、7 天轮换表、品牌词表、判定细则 |
+| `references/keywords.md` | A/B/C/D 分层词表、每日 24 条 Query 清单、两张 7 天轮换表、品牌词表、判定细则 |
 | `references/schema.md` | 定稿平铺 JSON、字段字典、大区判定、状态枚举、更新流结构 |
 | `scripts/send_webhook.ps1` | 飞书推送脚本，支持 `-DryRun` 校验 |
 | `data/seen.json` | 去重表，存全量字段（更新流的原值回填依赖它） |

@@ -19,7 +19,7 @@ description: 招标情报检索与飞书推送。当用户提到招标/招投标
 
 ## 阶段 1：检索
 
-使用豆包搜索 MCP（`mcp__doubao_web_search__doubao_search`），按 `references/keywords.md` 的「每日 Query 清单 + C 层轮换表」逐条执行（约 22 条/天：A/B 层固定 21 条 + 当天轮换组 1 条）。query 组拼规则见该文件 §4：`[3~6 个品类词] + [意图词：招标/采购/公告] + [可选年份]`。每条固定参数：
+使用豆包搜索 MCP（`mcp__doubao_web_search__doubao_search`），按 `references/keywords.md` 的「每日 Query 清单 + 轮换表」逐条执行（24 条/天：A/B 层固定 22 条 + 当天 C 层长尾词轮换组 1 条 + 当天 D 层意图词轮换 1 条）。query 组拼规则见该文件 §4：`[3~6 个品类词] + [意图词：招标/采购/公告] + [可选年份]`。每条固定参数：
 
 - `version`: `custom`（信源权威度分级，正文更完整）
 - `auth_level`: `1`（只保留政府/医院/军队官网等一手权威源——招投标场景信源质量压倒一切，聚合站和营销软文会直接滤掉）
@@ -149,7 +149,7 @@ SPA/API 站（上面第 2 级）同理：在返回的 JSON 里找 `fileId` / `fi
 
 ## 参考资料
 
-- `references/keywords.md` — 分层词表、每日 Query 清单与 C 层轮换表、品类枚举、判定细则（阶段1、4 必读）
+- `references/keywords.md` — 分层词表、每日 Query 清单与 C/D 层轮换表、品类枚举、判定细则（阶段1、4 必读）
 - `references/schema.md` — 定稿 JSON 结构、字段字典、状态枚举（阶段4 必读）
 - `scripts/send_webhook.ps1` — 飞书推送脚本（阶段5 使用；`-WebhookUrl` 参数可指定更新流地址）。加 `-DryRun` 只校验不发送：解析 JSON、检查"单条 / 平铺 / 无 JSON null"三条硬约束并打印载荷。退出码 0 通过、1 文件或 JSON 错误、2 校验不通过。调试与跑 eval 时用它，避免往台账里塞测试数据
 - `data/seen.json` — 去重表，全量字段存储（阶段2、5 读写）
