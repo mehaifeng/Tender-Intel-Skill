@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "doubao_web_search": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "github:alchaincyf/huashu-doubao-search"
+      ],
+      "env": {
+        "DOUBAO_SEARCH_API_KEY": "<你的豆包搜索 API Key>"
+      }
+    },
+    "mineru": {
+      "command": "uvx",
+      "args": [
+        "mineru-open-mcp"
+      ],
+      "env": {
+        "MINERU_API_TOKEN": "<你的 MinerU API Token，mineru.net 签发，有效期约 3 个月>"
+      }
+    }
+  }
+}

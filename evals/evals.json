@@ -1,0 +1,102 @@
+{
+  "skill_name": "tender-intel",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "跑一遍今天的招标情报：用豆包检索我们业务相关的招投标信息（过敏原/自身免疫IVD试剂和免疫分析仪器），核实后按定稿JSON推送到飞书webhook，最后给我执行摘要。",
+      "expected_output": "完成检索→去重→核实→结构化→推送全流程；每条有效项单独POST一个平铺JSON对象（不是数组），字段符合schema.md：无嵌套、无JSON null（空字符串填\"null\"、空数字填0）、含skill端生成的record_id；只推status为active或intel的记录；每条推送成功（HTTP 200且code:0）后把全量字段写入data/seen.json；输出摘要含执行的query条数（固定21条+当天轮换组）、跨查询去重后候选数、去重表跳过数、核实后有效数、剔除条目及原因、逐条推送的HTTP状态码与飞书返回、推送记录按status（active/intel）的分布。",
+      "files": [],
+      "expectations": [
+        "执行了当天完整的22条query：keywords.md §5的21条固定query，加上与运行当天星期对应的C层轮换组1条",
+        "每条query末尾都带意图词（招标公告/采购公告/招标/采购/询价公告/磋商公告/谈判公告/采购意向之一），没有出现只有品类词的query",
+        "豆包搜索参数按SKILL.md阶段1固定：version=custom、auth_level=1、max_age_days=45、count=10、snippet_length=1000",
+        "候选在与去重表比对之前，先按原文URL做了跨查询去重",
+        "只把带一手原文URL的结果作为候选，聚合站列表页（剑鱼标讯、bidcenter、招标网专题页等）没有被当作候选推送",
+        "推送前读取了data/seen.json，并按dedup_key规则比对（有项目编号用<project_code>|<purchaser>，无编号用source_url）",
+        "对候选逐条打开原文核实，抓取按四级降级顺序（curl→SPA反查API→MinerU→浏览器），没有在未尝试curl的情况下直接用浏览器",
+        "每条推送的载荷是单个平铺JSON对象而非数组，一条记录一次POST",
+        "每条载荷都含record_id，格式为T+yyyyMMdd+-+6位大写字母数字，且不含字符0、O、1、I",
+        "载荷中不出现JSON null：空字符串字段填\"null\"、空数字字段填0、布尔字段填false",
+        "载荷的region、category、matched_category、status取值都在schema.md与keywords.md的枚举范围内",
+        "推送的记录status只有active或intel两种取值，没有新建match_level为none的记录",
+        "每条推送成功（HTTP 200且code:0）后才把该条全量字段写入data/seen.json，推送失败的条目没有写入",
+        "执行摘要包含：query条数（固定+轮换组）、去重后候选数、去重表跳过数（含其中后续公告数）、核实后有效数、剔除条目及原因、逐条HTTP状态码与飞书返回、推送记录按status的分布"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "最近有没有过敏原特异性IgE试剂的招标？帮我查一下，有能投的就按标准格式推到飞书，没有就告诉我。",
+      "expected_output": "只执行过敏原线相关query（每条带意图词）；核实截止时间与品类匹配，清单不公开的标match_level为unknown不臆断；有有效项则逐条推送单个平铺JSON对象；零命中时不推送（不发空载荷、不发零命中结构），仅在摘要说明\"今日无新增有效条目\"；摘要说明判断依据。",
+      "files": [],
+      "expectations": [
+        "只执行了过敏原线相关的query（keywords.md §5第1~4条或其子集），没有跑完整的22条每日清单",
+        "每条query末尾都带意图词，没有出现只有品类词的query",
+        "豆包搜索参数按SKILL.md阶段1固定：version=custom、auth_level=1、max_age_days=45、count=10、snippet_length=1000",
+        "推送前读取了data/seen.json做去重比对",
+        "对候选逐条打开原文，核实了投标截止时间并计算days_left，以及采购清单是否真含过敏原sIgE类品类",
+        "采购清单不公开或只写\"试剂一批\"等笼统表述的候选，match_level标为unknown，没有臆断为full或partial",
+        "原文无法核实但检索信息无重大漏洞的候选没有被静默丢弃：照常推送，并在notes注明未能核实的原因与建议电话确认",
+        "有有效项时，每条推送的是单个平铺JSON对象、含record_id、不出现JSON null",
+        "没有为零命中发送任何载荷：若本次没有有效项，则完全跳过推送，既不发空数组也不发零命中结构",
+        "执行摘要说明了判断依据：各候选的截止时间与品类匹配判定结果，以及剔除条目的原因"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "把 evals/files/seen_pending_award.json 当作 data/seen.json 的当前内容。今天检索命中了一条公告：新蔡县人民医院流水线式全自动酶联免疫工作站项目（项目编号 新采招标-2026-26）的中标公告，发布日期 2026-08-10，中标供应商 河南康泰医疗器械有限公司，中标金额 985000 元，原文 https://zfcg.henan.gov.cn/zhumadian/content?channelCode=H780603&infoId=2011433 。按流程处理并给我执行摘要。",
+      "expected_output": "识别为已推送记录的后续公告，走更新流而非创建流：不生成新record_id、不POST创建流Webhook；POST一个恰好14字段的平铺JSON到更新流Webhook（-WebhookUrl 指定 DQFOamcvvwzRTDhct41cw9xznMe），变更字段填新值、未变更字段回填seen.json原值；成功后就地更新seen.json同一条记录，records长度仍为1。",
+      "files": ["evals/files/seen_pending_award.json"],
+      "expectations": [
+        "没有调用创建流Webhook，也没有为该项目生成新的record_id",
+        "更新载荷的record_id为T20260811-K7X2P9",
+        "更新载荷的字段恰好是schema.md固定字段集的14个：record_id、change_type、status、notice_type、publish_date、deadline、winner、award_amount、designated_supplier、budget、contact、attachment、source_url、notes",
+        "change_type为status_change，status为closed，notice_type为中标公告，publish_date为2026-08-10",
+        "winner为河南康泰医疗器械有限公司，award_amount为数字985000（不是字符串）",
+        "未变更字段回填了seen.json中的原值：budget为10000、contact为\"马先生 0396-2797388\"、deadline为\"2026-08-19T09:00\"、designated_supplier为\"null\"",
+        "载荷中不出现JSON null，空字符串字段填\"null\"、空数字字段填0",
+        "调用send_webhook.ps1时通过-WebhookUrl参数指定了更新流地址，而非使用脚本内置的创建流默认地址",
+        "推送成功后seen.json中T20260811-K7X2P9这条记录被就地更新为status=closed并写入winner与award_amount，records数组长度仍为1",
+        "执行摘要中把这条计入更新流，而非创建流新增"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "把 evals/files/seen_overdue_active.json 当作 data/seen.json 的当前内容。做一次每日自查：看看去重表里有没有截止时间已过但状态还是active的记录，有的话按流程处理。",
+      "expected_output": "自查发现T20260625-M4Q8R2的deadline（2026-07-15T09:30）已过而status仍为active，触发更新流status_change把status改为closed；14字段全发、未变更字段回填原值；成功后就地更新seen.json；不创建新记录、不发起检索。",
+      "files": ["evals/files/seen_overdue_active.json"],
+      "expectations": [
+        "识别出T20260625-M4Q8R2的deadline已过且status仍为active",
+        "没有调用创建流Webhook，也没有生成新record_id",
+        "更新载荷的change_type为status_change，status为closed",
+        "更新载荷恰好包含schema.md固定字段集的14个字段",
+        "未变更字段回填了原值：winner为\"null\"、award_amount为0、designated_supplier为\"null\"、budget为480000、deadline仍为\"2026-07-15T09:30\"",
+        "调用send_webhook.ps1时通过-WebhookUrl参数指定了更新流地址",
+        "推送成功后seen.json中该记录就地更新为status=closed",
+        "执行摘要说明这条来自每日自查而非当日检索"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "这里有两个已经抓好的公告页面HTML，对应的source_url分别是 https://www.chinablood.com.cn/jyb/social_announcement/12308.html 和 https://ggzy.xinjiang.gov.cn/jyxx/001004/001004003/20260730/1101000036010115.html 。按阶段3逐条核实、阶段4结构化，把两条记录的JSON写成文件给我看。这条只验证提取质量，不要推送飞书。",
+      "expected_output": "两条记录的contact与attachment都被正确提取：chinablood的相对路径附件补全为绝对URL、新疆的跨域OSS附件未被丢弃；chinablood识别为单一来源公示（status为intel）；不向飞书发起任何POST。",
+      "files": [
+        "evals/files/page_chinablood_relative_attachment.html",
+        "evals/files/page_ggzy_xinjiang_crossdomain_attachment.html"
+      ],
+      "expectations": [
+        "对原始HTML执行了href加文件扩展名的检索（grep或等价手段），而不是只通读可见文本后凭印象填写",
+        "chinablood那条的attachment为绝对URL https://www.chinablood.com.cn/Uploads/Picture/2026/07/23/u6a61b086938f0.pdf",
+        "chinablood那条的attachment不是页面里字面存在的相对路径 /Uploads/Picture/2026/07/23/u6a61b086938f0.pdf，即做了scheme+host补全",
+        "没有把 /Uploads/Picture/ 目录下的png或jpg装饰图当作attachment（该目录同时存放18个png和2个jpg，判别只能靠扩展名而非目录名）",
+        "新疆那条的attachment为 https://zcy-gov-open-doc.oss-cn-north-2-gov-1.aliyuncs.com/1023FP/510199/10008526436/20267/085134ec-9ce1-4b30-82c8-38067a63e8ba.doc",
+        "新疆那条的attachment没有因为与source_url跨域（aliyuncs.com与ggzy.xinjiang.gov.cn不同域）而被丢弃",
+        "两条记录的attachment都不是\"null\"",
+        "chinablood那条的contact不是\"null\"，且含电话022-2360 8039或022-2445 8500",
+        "新疆那条的contact不是\"null\"，且含电话0991-4881798",
+        "chinablood那条的notice_type为单一来源公示、status为intel，不是active",
+        "chinablood正文的\"拟采购的货物或服务的说明\"为空、清单只在PDF附件里，没有据此臆断match_level为full或partial：要么从附件读到清单后判定，要么标unknown",
+        "全程没有向飞书Webhook发起任何POST"
+      ]
+    }
+  ]
+}

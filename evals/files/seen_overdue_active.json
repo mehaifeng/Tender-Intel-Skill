@@ -1,0 +1,36 @@
+{
+  "records": [
+    {
+      "dedup_key": "LYRM-2026-0612|临沂市人民医院",
+      "first_seen": "2026-06-25",
+      "last_seen": "2026-06-25",
+      "pushed": true,
+      "title": "临沂市人民医院过敏原特异性IgE检测试剂采购项目",
+      "record_id": "T20260625-M4Q8R2",
+      "region": "华北一区",
+      "project_code": "LYRM-2026-0612",
+      "purchaser": "临沂市人民医院",
+      "agency": "null",
+      "procurement_method": "竞争性磋商",
+      "notice_type": "采购公告",
+      "category": "试剂",
+      "budget": 480000,
+      "tech_key_points": "★过敏原特异性IgE定量检测；★吸入组+食入组各不少于20项；★须有医疗器械注册证",
+      "publish_date": "2026-06-24",
+      "doc_fetch_end": "2026-07-08T17:00",
+      "deadline": "2026-07-15T09:30",
+      "days_left": 20,
+      "contact": "王女士 0539-8226999",
+      "source_url": "http://www.ccgp-shandong.gov.cn/sdgp2017/site/read.jsp?id=202606240612",
+      "attachment": "null",
+      "match_level": "full",
+      "matched_category": "过敏原sIgE试剂",
+      "status": "active",
+      "requires_manual": false,
+      "designated_supplier": "null",
+      "winner": "null",
+      "award_amount": 0,
+      "notes": "null"
+    }
+  ]
+}

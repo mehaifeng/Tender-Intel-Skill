@@ -1,0 +1,15 @@
+# MCP 配置含 API 密钥，禁止提交；参照 .mcp.json.example 在本地创建
+.mcp.json
+
+# 本机权限允许清单，因机器而异
+.claude/settings.local.json
+
+# 调试探针与临时产物（含 token 明文、下载的附件）
+.tmp/
+__pycache__/
+*.pyc
+
+# 去重表：仓库里只保留空骨架，运行后累积的业务情报不再提交
+# 注意：该文件已被跟踪，.gitignore 对它无效，实际靠 git update-index --skip-worktree 生效
+# 恢复跟踪：git update-index --no-skip-worktree data/seen.json
+data/seen.json
