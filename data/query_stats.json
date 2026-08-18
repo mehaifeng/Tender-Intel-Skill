@@ -6,7 +6,256 @@
     "unique": "跨查询去重后仅由该条 query 命中的 URL 数（found_by_query 长度为 1 且等于本编号）——唯一有意义的贡献指标；raw 高而 unique 恒为 0 的 query 是纯冗余",
     "pushed": "其中最终核实通过并推送成功的条数，阶段 5 回填",
     "rule": "连续 14 个运行日 unique 恒为 0 的 query 予以裁撤；裁撤名额优先给采购意向继续铺品类线，保持每日总量不变。完整规则见 references/keywords.md §12",
-    "since": "归因自 2026-08-18 起采集；此前的 seen.json 记录无 found_by_query，不参与 14 日窗口计数"
+    "since": "归因自 2026-08-18 起采集；此前的 seen.json 记录无 found_by_query，不参与 14 日窗口计数",
+    "caveat_2026-08-18": "首日数据采集于 BlockHosts 生效之前，包含后来被屏蔽的 5 个噪声域名（约占当日候选 29%）的贡献，因此 raw/unique 略高于此后各日，不完全可比。方向上是保守的——虚高只会让 query 显得更有价值，不会导致误裁。当日：49 条 query、771 条原始结果、638 条候选。"
   },
-  "days": {}
+  "days": {
+    "2026-08-18": {
+      "1": {
+        "raw": 20,
+        "unique": 10,
+        "pushed": 0
+      },
+      "2": {
+        "raw": 9,
+        "unique": 5,
+        "pushed": 0
+      },
+      "3": {
+        "raw": 12,
+        "unique": 11,
+        "pushed": 0
+      },
+      "4": {
+        "raw": 11,
+        "unique": 5,
+        "pushed": 0
+      },
+      "5": {
+        "raw": 16,
+        "unique": 11,
+        "pushed": 0
+      },
+      "6": {
+        "raw": 17,
+        "unique": 12,
+        "pushed": 0
+      },
+      "7": {
+        "raw": 9,
+        "unique": 5,
+        "pushed": 0
+      },
+      "8": {
+        "raw": 11,
+        "unique": 11,
+        "pushed": 0
+      },
+      "9": {
+        "raw": 20,
+        "unique": 20,
+        "pushed": 0
+      },
+      "10": {
+        "raw": 13,
+        "unique": 7,
+        "pushed": 0
+      },
+      "11": {
+        "raw": 14,
+        "unique": 5,
+        "pushed": 0
+      },
+      "12": {
+        "raw": 5,
+        "unique": 4,
+        "pushed": 0
+      },
+      "13": {
+        "raw": 20,
+        "unique": 16,
+        "pushed": 0
+      },
+      "14": {
+        "raw": 20,
+        "unique": 11,
+        "pushed": 0
+      },
+      "15": {
+        "raw": 20,
+        "unique": 18,
+        "pushed": 0
+      },
+      "16": {
+        "raw": 14,
+        "unique": 12,
+        "pushed": 0
+      },
+      "17": {
+        "raw": 8,
+        "unique": 8,
+        "pushed": 0
+      },
+      "18": {
+        "raw": 17,
+        "unique": 17,
+        "pushed": 0
+      },
+      "19": {
+        "raw": 20,
+        "unique": 16,
+        "pushed": 0
+      },
+      "20": {
+        "raw": 17,
+        "unique": 16,
+        "pushed": 0
+      },
+      "21": {
+        "raw": 12,
+        "unique": 11,
+        "pushed": 0
+      },
+      "22": {
+        "raw": 16,
+        "unique": 15,
+        "pushed": 0
+      },
+      "23": {
+        "raw": 18,
+        "unique": 18,
+        "pushed": 0
+      },
+      "24": {
+        "raw": 18,
+        "unique": 13,
+        "pushed": 0
+      },
+      "25": {
+        "raw": 12,
+        "unique": 9,
+        "pushed": 0
+      },
+      "26": {
+        "raw": 20,
+        "unique": 19,
+        "pushed": 0
+      },
+      "27": {
+        "raw": 15,
+        "unique": 15,
+        "pushed": 0
+      },
+      "28": {
+        "raw": 17,
+        "unique": 15,
+        "pushed": 0
+      },
+      "29": {
+        "raw": 5,
+        "unique": 4,
+        "pushed": 0
+      },
+      "30": {
+        "raw": 17,
+        "unique": 15,
+        "pushed": 0
+      },
+      "31": {
+        "raw": 20,
+        "unique": 17,
+        "pushed": 0
+      },
+      "32": {
+        "raw": 19,
+        "unique": 15,
+        "pushed": 0
+      },
+      "33": {
+        "raw": 20,
+        "unique": 14,
+        "pushed": 0
+      },
+      "34": {
+        "raw": 17,
+        "unique": 14,
+        "pushed": 0
+      },
+      "35": {
+        "raw": 10,
+        "unique": 8,
+        "pushed": 0
+      },
+      "36": {
+        "raw": 15,
+        "unique": 12,
+        "pushed": 0
+      },
+      "37": {
+        "raw": 9,
+        "unique": 9,
+        "pushed": 0
+      },
+      "38": {
+        "raw": 11,
+        "unique": 8,
+        "pushed": 0
+      },
+      "39": {
+        "raw": 20,
+        "unique": 2,
+        "pushed": 0
+      },
+      "40": {
+        "raw": 15,
+        "unique": 5,
+        "pushed": 0
+      },
+      "41": {
+        "raw": 20,
+        "unique": 2,
+        "pushed": 0
+      },
+      "42": {
+        "raw": 20,
+        "unique": 6,
+        "pushed": 0
+      },
+      "43": {
+        "raw": 19,
+        "unique": 2,
+        "pushed": 0
+      },
+      "44": {
+        "raw": 20,
+        "unique": 11,
+        "pushed": 0
+      },
+      "45": {
+        "raw": 13,
+        "unique": 12,
+        "pushed": 0
+      },
+      "46": {
+        "raw": 20,
+        "unique": 13,
+        "pushed": 0
+      },
+      "47": {
+        "raw": 20,
+        "unique": 11,
+        "pushed": 0
+      },
+      "48": {
+        "raw": 20,
+        "unique": 13,
+        "pushed": 0
+      },
+      "49": {
+        "raw": 20,
+        "unique": 16,
+        "pushed": 0
+      }
+    }
+  }
 }

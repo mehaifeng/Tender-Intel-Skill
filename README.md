@@ -9,12 +9,12 @@
 ## 五阶段管线
 
 ```
-1. 检索    豆包搜索跑固定 49 条 query（每天完全相同，不轮换、不随机）
-              ↓  一手、第三方及聚合站详情页均可为候选；其 URL 即 source_url，按 URL 跨查询去重并记 found_by_query
+1. 检索    doubao_search.py 直连官方 API 跑固定 49 条 query（每天完全相同，不轮换、不随机）
+              ↓  脚本内完成清单校验、跨 URL 去重、found_by_query 归因；结果落盘不进上下文
 2. 去重    对照 data/seen.json，跳过已推送；识别后续公告转入更新流
               ↓
-3. 核实    逐条打开原文，四级降级抓取，核对六项
-              ↓  curl → SPA 反查 API → MinerU 转 md → 浏览器兜底
+3. 核实    逐条打开原文，三级降级抓取，核对六项
+              ↓  正文：curl → SPA 反查 API → 浏览器兜底；PDF 附件：curl 下载后用 Read 读
 4. 结构化  按 schema.md 组织平铺 JSON
               ↓
 5. 推送    创建流 / 更新流两个 Webhook，逐条 POST，成功后写 seen.json
@@ -31,10 +31,12 @@
 
 | 路径 | 说明 |
 |---|---|
-| `SKILL.md` | 管线定义。含四级降级抓取策略与附件提取的机械步骤 |
+| `SKILL.md` | 管线定义。含三级降级抓取策略与附件提取的机械步骤 |
 | `references/keywords.md` | A/B/C/D 分层词表、每日固定 49 条 Query 清单、品牌词表、判定细则、清单裁撤规则 |
 | `references/schema.md` | 定稿平铺 JSON、字段字典、seen.json 专属字段、大区判定、状态枚举、更新流结构 |
+| `scripts/doubao_search.py` | 阶段 1 检索器，直连豆包官方 API。含清单校验、去重、归因，支持 `--dry-run` |
 | `scripts/send_webhook.ps1` | 飞书推送脚本，支持 `-DryRun` 校验 |
+| `config/doubao.example.json` | 检索配置模板；复制为 `config/doubao.json`（已 gitignore）填 API Key |
 | `data/seen.json` | 去重表，存全量字段（更新流的原值回填依赖它） |
 | `data/query_stats.json` | 每日每条 query 的 raw / unique / pushed 归因统计，裁撤零贡献 query 的依据 |
 | `evals/` | 5 条 eval、59 条断言、4 个 fixture |
@@ -44,26 +46,31 @@
 ### 依赖
 
 - Claude Code（或其他支持 Skill 的 Agent）
-- Node.js（`npx`）、[uv](https://github.com/astral-sh/uv)（`uvx`）
+- Python 3.9+ 与 `requests`（阶段 1 检索脚本）
 - Windows + PowerShell（推送脚本为 `.ps1`）
-- Git Bash 或等价 POSIX shell（附件提取用到 `grep -E`）
+- Git Bash 或等价 POSIX shell（附件提取用到 `grep -E`、`curl.exe`）
 
-### 1. MCP 服务器
+**本技能不依赖任何 MCP 服务器**（2026-08-18 起）。阶段 1 检索改为直连官方 API 的 Python 脚本，阶段 3 的 PDF 附件解析改用 Read 工具，两个 MCP 都已移除。
 
-复制 `.mcp.json.example` 为 `.mcp.json`，填入自己的密钥：
+### 1. 豆包搜索（阶段 1）
+
+复制配置模板，填入 API Key：
 
 ```bash
-cp .mcp.json.example .mcp.json
+cp config/doubao.example.json config/doubao.json
 ```
 
-| Server | 用途 | 密钥来源 |
-|---|---|---|
-| `doubao_web_search` | 阶段 1 检索 | 豆包搜索 API Key |
-| `mineru` | 阶段 3 第 3 级，扫描件/动态渲染页转 Markdown | [mineru.net](https://mineru.net) 签发，有效期约 3 个月 |
+Key 来自[火山引擎控制台 → 联网搜索 → API Key 管理](https://console.volcengine.com/search-infinity/api-key)。也可改用环境变量 `DOUBAO_SEARCH_API_KEY`，优先级高于配置文件。`config/doubao.json` 已在 `.gitignore` 中。
 
-`.mcp.json` 已在 `.gitignore` 中，不会被提交。**MCP 在会话启动时加载，改完配置需重启会话。** 首次运行 `npx` / `uvx` 会下载依赖，耗时较长。
+验证配置（不发请求、不花钱）：
 
-MinerU 的 token 会过期，过期后阶段 3 第 3 级返回 401。SKILL.md 已规定此时直接降到下一级、不反复重试，所以管线不会卡死，但**扫描件类附件会读不出来**——这类附件常是采购清单的唯一载体，直接影响品类匹配。
+```bash
+python scripts/doubao_search.py --dry-run
+```
+
+> 2026-08-18 前这一步走第三方 MCP `huashu-doubao-search`，现已移除：它把 `Count` 卡在 20（官方 50）、把官方只有 0/1 的 `AuthInfoLevel` 自造成 1~4 分级、不暴露 `TimeRange` 闭区间与 `Sites`/`BlockHosts`，且以 `npx -y github:...` 每次会话拉 HEAD 执行并持有 API Key。
+
+**调用量与配额**：49 条/天 × 30 天 = 1470 次/月，而火山账号每月免费额度 500 次——本管线在付费区间运行。账号维度默认 5 QPS，脚本按 4 QPS 限流，全量跑一轮约 30 秒。
 
 ### 2. 飞书
 
@@ -103,8 +110,8 @@ powershell -File scripts/send_webhook.ps1 -PayloadPath payload.json -DryRun
 
 | # | 场景 | 前提 |
 |---|---|---|
-| 1 | 每日全量跑 | 需要豆包 MCP，**会真推飞书** |
-| 2 | 过敏原 sIgE 定向查 | 需要豆包 MCP |
+| 1 | 每日全量跑 | 需要豆包 API Key，**会真推飞书** |
+| 2 | 过敏原 sIgE 定向查 | 需要豆包 API Key |
 | 3 | 更新流·中标公告 | 离线，**会真推飞书更新流** |
 | 4 | 每日自查·截止转 closed | 离线，**会真推飞书更新流** |
 | 5 | 附件与联系方式提取 | 完全离线，不推送 |
