@@ -11,7 +11,7 @@ description: 招标情报检索与飞书推送。当用户提到招标/招投标
 
 五个阶段，顺序执行：
 
-1. **检索**：豆包搜索按 keywords.md 每日固定 46 条 Query 清单检索（每天完全相同），候选跨查询去重后进入去重
+1. **检索**：豆包搜索按 keywords.md 每日固定 49 条 Query 清单检索（每天完全相同），候选跨查询去重后进入去重
 2. **去重**：对照 `data/seen.json` 去重表，跳过已推送项；识别**后续公告**（中标/废标/更正）转入更新流
 3. **清洗核实**：逐条打开原文核实，过滤无效项
 4. **结构化**：按定稿 JSON 组织每条有效项（创建流 / 更新流两种格式）
@@ -19,16 +19,23 @@ description: 招标情报检索与飞书推送。当用户提到招标/招投标
 
 ## 阶段 1：检索
 
-使用豆包搜索 MCP（`mcp__doubao_web_search__doubao_search`），按 `references/keywords.md` §5 的「每日 Query 清单」逐条执行（**46 条/天，每天完全相同**：A/B 层 23 条 + C 层长尾词 15 条 + D 层意图词全覆盖块 8 条）。清单是固定的，**不轮换、不随机、不按星期挑组，也不许自行删减**——漏跑等于该词组当天零覆盖。query 组拼规则见该文件 §4：`[3~6 个品类词] + [意图词：招标/采购/公告] + [可选年份]`。每条固定参数：
+使用豆包搜索 MCP（`mcp__doubao_web_search__doubao_search`），按 `references/keywords.md` §5 的「每日 Query 清单」逐条执行（**49 条/天，每天完全相同**：A/B 层 23 条 + C 层长尾词 15 条 + D 层意图词分层覆盖块 11 条）。清单是固定的，**不轮换、不随机、不按星期挑组，也不许自行删减**——漏跑等于该词组当天零覆盖。query 组拼规则见该文件 §4：`[3~6 个品类词] + [意图词：招标/采购/公告] + [可选年份]`。每条固定参数：
 
 - `version`: `custom`（信源权威度分级，正文更完整）
 - `auth_level`: `2`（扩大召回范围，允许政府/医院等一手源以及第三方、聚合招标网站；后者必须在后续核实中明确标注其信源属性）
 - `max_age_days`: `45`（时效窗口；每天跑的话 45 天足够覆盖当月公告，且能过滤旧单重发）
-- `count`: `10`，`snippet_length`: `1000`（摘要要长，直接可读）
+- `count`: `20`（2026-08-18 由 10 上调，取满上限；真实漏采多是"文档在结果集里但排在第 11 位"，加深度比加 query 便宜——理由与代价见 keywords.md §0）
+- `snippet_length`: `1000`（摘要要长，直接可读）
 
 **执行前校验（意图词）**：逐条核对当天清单，每条 query 末尾必须含一个意图词（招标 / 采购 / 公告 / 采购公告 之一），缺失的补 `采购公告` 再执行。意图词是领域开关：无意图词的 query 会被医学文献/科室科普稀释，招标页排不进 top-N 等于漏采（2026-08-14 对照检索实证）。
 
 从每条结果中提取候选：标题、来源站点、URL、发布时间、摘要。**带有可访问详情页 URL 的一手、第三方或聚合网站记录都可作为候选**；第三方/聚合网站记录直接以其结果 URL 作为 `source_url`，不得臆造或替换为未实际取得的一手链接。**候选收集后先按 `source_url` 跨查询去重**（同一页面会被多条 query 同时命中），再进入阶段 2。
+
+**归因采集（跨查询去重时顺手做，别事后补）**：去重是把"同一 URL 的多次命中"合并的唯一时刻，命中它的 query 编号只有此刻手上有。
+
+1. 每条候选记 `found_by_query`：命中它的**全部** query 编号数组（如 `[3, 27]`）——只记第一个命中的会让"哪条 query 可被替代"无从判断
+2. 本次运行按 query 统计写入 `data/query_stats.json`，每条 query 一行：`raw`（该 query 返回候选数）、`unique`（去重后仅该条命中的 URL 数，即 `found_by_query` 长度为 1 且等于本编号的候选数）、`pushed`（其中最终推送成功数，阶段 5 回填）
+3. 用途与裁撤规则见 keywords.md §12。`found_by_query` **只进 seen.json，绝不进飞书载荷**（飞书字段集固定且不接受数组）
 
 ## 阶段 2：去重
 
@@ -44,7 +51,7 @@ description: 招标情报检索与飞书推送。当用户提到招标/招投标
   - 不是后续公告 → 跳过，摘要里记"已推送过"
 - key 不在表内 → 继续核实（走创建流）
 
-**记录存储**：seen.json 每条记录存**全量字段**（创建流完整 JSON 载荷 + `dedup_key / first_seen / last_seen / pushed`）；更新流的"原值回填"依赖它取未变更字段的原值。
+**记录存储**：seen.json 每条记录存**全量字段**（创建流完整 JSON 载荷 + `dedup_key / first_seen / last_seen / pushed / found_by_query`）；更新流的"原值回填"依赖它取未变更字段的原值。后四个是 seen.json 专属元字段，**不进飞书载荷**（见 schema.md「seen.json 专属字段」）。
 
 **写入时机**：
 - 创建流：推送成功（HTTP 200 且返回 `code: 0`）后写入；失败不写，下次运行自动重试
@@ -122,7 +129,7 @@ SPA/API 站（上面第 2 级）同理：在返回的 JSON 里找 `fileId` / `fi
 2. 每条生成 `record_id`（格式见 schema.md：`T`+yyyyMMdd+`-`+6位随机大写字母数字，剔除 0/O/1/I，如 `T20260812-A3B9C7`），写入载荷并存入 seen.json——后续更新的定位键，永不改变
 3. 逐条推送：每条写一个 JSON 文件，调用 `scripts/send_webhook.ps1 -PayloadPath <该条文件>` POST 到创建流 Webhook（默认 URL 已内置，可用参数覆盖）
 4. **零命中不推送**：无有效条目时跳过推送，仅在执行摘要说明（避免飞书堆积无意义记录）
-5. 每条**推送成功后**（HTTP 200 且 `code: 0`），把该条**全量字段**写入 `data/seen.json`（见阶段 2 记录存储）；失败不写，下次运行自动重试
+5. 每条**推送成功后**（HTTP 200 且 `code: 0`），把该条**全量字段**写入 `data/seen.json`（见阶段 2 记录存储），同时把该条的 `found_by_query` 回填进 `data/query_stats.json` 当日各相关 query 的 `pushed` 计数；失败不写，下次运行自动重试
 
 ### 5b. 更新流（已有记录的后续公告）
 
@@ -145,13 +152,16 @@ SPA/API 站（上面第 2 级）同理：在返回的 JSON 里找 `fileId` / `fi
 
 ### 5c. 执行摘要
 
-给用户输出：执行了多少条 query（应为 46 条，少于此数须说明原因）、候选几条（去重后）、去重跳过几条（其中后续公告几条）、核实后有效几条、剔除几条及原因、创建流逐条推送结果（HTTP 状态码 + 飞书返回）、更新流逐条更新结果；推送记录按 status 分布（active / intel）列明。
+给用户输出：执行了多少条 query（应为 49 条，少于此数须说明原因）、候选几条（去重后）、去重跳过几条（其中后续公告几条）、核实后有效几条、剔除几条及原因、创建流逐条推送结果（HTTP 状态码 + 飞书返回）、更新流逐条更新结果；推送记录按 status 分布（active / intel）列明。
+
+再加一段**归因摘要**（数据来自 `data/query_stats.json`）：本次 `unique` > 0 的 query 有哪几条、各贡献几条；`unique` 为 0 的 query 列出编号。**不要据单日结果建议增删 query**——裁撤门槛是连续 14 个运行日，规则见 keywords.md §12。
 
 ## 参考资料
 
-- `references/keywords.md` — 分层词表、每日固定 46 条 Query 清单、品类枚举、判定细则（阶段1、4 必读）
+- `references/keywords.md` — 分层词表、每日固定 49 条 Query 清单、意图词分层依据（§3.2）、品类枚举、判定细则、清单演进与裁撤规则（§12）（阶段1、4 必读）
 - `references/schema.md` — 定稿 JSON 结构、字段字典、状态枚举（阶段4 必读）
 - `scripts/send_webhook.ps1` — 飞书推送脚本（阶段5 使用；`-WebhookUrl` 参数可指定更新流地址）。加 `-DryRun` 只校验不发送：解析 JSON、检查"单条 / 平铺 / 无 JSON null"三条硬约束并打印载荷。退出码 0 通过、1 文件或 JSON 错误、2 校验不通过。调试与跑 eval 时用它，避免往台账里塞测试数据
 - `data/seen.json` — 去重表，全量字段存储（阶段2、5 读写）
+- `data/query_stats.json` — 每日每条 query 的 raw / unique / pushed 归因统计（阶段1 写入、阶段5 回填 pushed）；裁撤判据见 keywords.md §12
 - 创建流 Webhook：`https://cp-pharm.feishu.cn/base/workflow/webhook/event/BiHYar0YcwkDhYhjVF4cVFMgnJf`（send_webhook.ps1 内置默认）
 - 更新流 Webhook：`https://cp-pharm.feishu.cn/base/workflow/webhook/event/DQFOamcvvwzRTDhct41cw9xznMe`（2026-08-12 用户确认；发送时用 `-WebhookUrl` 参数指定）

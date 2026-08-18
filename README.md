@@ -9,8 +9,8 @@
 ## 五阶段管线
 
 ```
-1. 检索    豆包搜索跑固定 46 条 query（每天完全相同，不轮换、不随机）
-              ↓  一手、第三方及聚合站详情页均可为候选；其 URL 即 source_url，按 URL 跨查询去重
+1. 检索    豆包搜索跑固定 49 条 query（每天完全相同，不轮换、不随机）
+              ↓  一手、第三方及聚合站详情页均可为候选；其 URL 即 source_url，按 URL 跨查询去重并记 found_by_query
 2. 去重    对照 data/seen.json，跳过已推送；识别后续公告转入更新流
               ↓
 3. 核实    逐条打开原文，四级降级抓取，核对六项
@@ -32,11 +32,12 @@
 | 路径 | 说明 |
 |---|---|
 | `SKILL.md` | 管线定义。含四级降级抓取策略与附件提取的机械步骤 |
-| `references/keywords.md` | A/B/C/D 分层词表、每日固定 46 条 Query 清单、品牌词表、判定细则 |
-| `references/schema.md` | 定稿平铺 JSON、字段字典、大区判定、状态枚举、更新流结构 |
+| `references/keywords.md` | A/B/C/D 分层词表、每日固定 49 条 Query 清单、品牌词表、判定细则、清单裁撤规则 |
+| `references/schema.md` | 定稿平铺 JSON、字段字典、seen.json 专属字段、大区判定、状态枚举、更新流结构 |
 | `scripts/send_webhook.ps1` | 飞书推送脚本，支持 `-DryRun` 校验 |
 | `data/seen.json` | 去重表，存全量字段（更新流的原值回填依赖它） |
-| `evals/` | 5 条 eval、54 条断言、4 个 fixture |
+| `data/query_stats.json` | 每日每条 query 的 raw / unique / pushed 归因统计，裁撤零贡献 query 的依据 |
+| `evals/` | 5 条 eval、59 条断言、4 个 fixture |
 
 ## 安装
 

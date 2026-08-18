@@ -70,6 +70,20 @@
 | award_amount | number | 中标/成交金额；无则 `0` |
 | notes | string | 备注：排除原因、次类匹配、附件补充链接、待确认事项等；无则 `"null"` |
 
+## seen.json 专属字段（**绝不进飞书载荷**）
+
+上面的字段字典 = 创建流飞书载荷的**完整**字段集。`data/seen.json` 在此基础上额外存 5 个元字段，供去重、更新流原值回填与 query 归因使用：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| dedup_key | string | 去重键：有项目编号用 `<project_code>\|<purchaser>`，无则用 `source_url` |
+| first_seen | string | 首次命中日期 YYYY-MM-DD |
+| last_seen | string | 最近一次命中日期 YYYY-MM-DD |
+| pushed | bool | 是否已推送成功（HTTP 200 且 `code: 0`） |
+| found_by_query | number[] | 命中该条的**全部** keywords.md §5 query 编号，如 `[3, 27]`；阶段 1 跨查询去重时采集，用途见 keywords.md §12 |
+
+**推送前必须剥掉这 5 个字段。** 飞书字段集固定、平铺、不接受嵌套——`found_by_query` 是数组，混进载荷会直接触发字段识别报错。`scripts/send_webhook.ps1 -DryRun` 的平铺校验能拦住它，改动载荷组装逻辑后先用 DryRun 过一遍。
+
 ## 大区判定（region 单选）
 
 `region` 按**采购人（purchaser）所在省份**判定。飞书字段为单选，只能填以下选项之一：

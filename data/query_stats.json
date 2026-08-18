@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "doc": {
+    "days": "运行日期 -> query 编号（字符串，对应 references/keywords.md §5）-> {raw, unique, pushed}",
+    "raw": "该条 query 本次返回的候选数",
+    "unique": "跨查询去重后仅由该条 query 命中的 URL 数（found_by_query 长度为 1 且等于本编号）——唯一有意义的贡献指标；raw 高而 unique 恒为 0 的 query 是纯冗余",
+    "pushed": "其中最终核实通过并推送成功的条数，阶段 5 回填",
+    "rule": "连续 14 个运行日 unique 恒为 0 的 query 予以裁撤；裁撤名额优先给采购意向继续铺品类线，保持每日总量不变。完整规则见 references/keywords.md §12",
+    "since": "归因自 2026-08-18 起采集；此前的 seen.json 记录无 found_by_query，不参与 14 日窗口计数"
+  },
+  "days": {}
+}
