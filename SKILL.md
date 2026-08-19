@@ -55,7 +55,7 @@ python scripts/doubao_search.py
 - `search_summary.json`：Query成功/失败、候选数和轻量归因；报告时读取它，不读`raw.json`
 - stdout：最多20条预览与归因摘要
 
-`NeedContent=true`只表示要求搜索API尽量返回正文，不构成信源核实；凡进入`create`或`update`的候选仍必须访问`source_url`并留下字段证据。搜索正文只能用于初筛。
+`NeedContent=true`会同时返回标题、Summary和Content。脚本先用标题中的招采/交易意图词排除科普、营销、报告等明显噪声，再用Summary/Content识别目标品类。优先访问`source_url`核实；源页无法访问但标题明确属于招采且Summary/Content明确命中目标品类时，可以使用绑定原始正文文件的`verification_level: search_content`生成飞书`status: manual`记录。`active`、`intel`和所有`update`仍必须核实`source_url`。
 
 不要手工执行49次搜索。定向查询使用`--queries`或`--query`，不得污染全量归因统计。Query设计与裁撤规则仅在修改检索策略时读取 `references/keywords.md`。
 
@@ -67,7 +67,7 @@ python scripts/tender_pipeline.py prepare --search-dir <检索落盘目录> --ba
 
 省略`--mode`时脚本确定性默认为`report-only`。只有前述规则已经明确判定为`search-only`、`verify-only`、`daily-push`或`update-only`时才自动追加相应`--mode`；不得把这个参数变成向用户提出的选择题。
 
-该命令执行seen精确去重、后续公告提示、明确噪声预筛、完全相同标题聚类，并生成`pipeline/manifest.json`和小批次文件。
+该命令执行seen精确去重、后续公告提示、标题招采意图预筛、Summary/Content品类信号提取、完全相同标题聚类，并生成`pipeline/manifest.json`和小批次文件。正文本身不进入批次，批次只携带脚本提取的信号与`content_path`。
 
 ## 4. 只按状态机处理当前批次
 
@@ -76,10 +76,11 @@ python scripts/tender_pipeline.py status --run-dir <检索落盘目录>
 python scripts/tender_pipeline.py next-batch --run-dir <检索落盘目录>
 ```
 
-只处理`next-batch`返回的文件。按 `references/verification.md` 核实source_url和附件，按 `references/schema.md` 生成记录与字段证据。
+只处理`next-batch`返回的文件。按 `references/verification.md` 优先核实source_url和附件，按 `references/schema.md` 生成记录与字段证据。
 
 - 第三方页面可访问、目标品类可以确认、但采购人等字段被脱敏时：输出`decision: create`，记录使用`status: manual`、`requires_manual: true`，走创建流推送飞书。
-- 页面无法访问、搜索内容与页面不一致或连目标品类都不能确认时：输出`decision: manual`，只进入本地人工队列，不生成载荷。
+- 页面无法访问，但Doubao标题含明确招采/交易意图，且Summary/Content明确包含目标试剂或仪器时：输出`decision: create`和飞书`status: manual`；证据使用`source_verified: false`、`verification_level: search_content`及该候选的`content_path`。脚本会复核标题、正文、URL并写入正文SHA-256。
+- 只有标题而Summary/Content不能确认目标品类、只有笼统“医疗采购/试剂一批”、搜索内容错配，或缺少招采意图时：输出`decision: manual`或`exclude`，不生成载荷。
 - 不得把`decision: manual`与飞书字段`status: manual`混为一谈。
 
 把本批结果写成JSON后提交：

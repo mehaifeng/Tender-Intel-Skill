@@ -4,17 +4,17 @@
 
 面向 IVD 细分领域：**过敏原 / 自身免疫类诊断试剂**（sIgE、总 IgE、自身抗体、ELISA 酶免、化学发光、免疫荧光/印迹）与**免疫分析仪器**（化学发光免疫分析仪、全自动酶免工作站、酶标仪、洗板机等）。
 
-核心理念：**检索要快而全，核实要严而准，推送只给业务能直接用的数据**。宁可零命中也不硬凑；无法核实的进入人工队列，不生成可推送载荷。
+核心理念：**检索要快而全，核实要分层，推送要可追溯**。标题先排除科普、营销等非招采内容；Doubao Summary/Content足以确认目标品类但源页打不开时，可作为绑定正文哈希的飞书`manual`线索。可投标与情报记录仍要求源页核实。
 
 ## 五阶段管线
 
 ```
 1. 检索    doubao_search.py 直连官方 API 跑固定 49 条 query
               ↓  完整正文逐条落盘；stdout 只预览 20 条；另存轻量运行摘要
-2. 排队    tender_pipeline.py 做 seen 去重、保守预筛、转载聚类和 5 条一批
+2. 排队    tender_pipeline.py 做 seen 去重、标题招采意图预筛、Content品类信号和 5 条一批
               ↓  manifest 状态机可中断续跑
-3. 核实    模型只读取当前批次；source_url 与附件必须核实
-              ↓  第三方脱敏但品类明确→飞书manual；打不开或品类不明→本地manual
+3. 核实    模型只读取当前批次；优先核实 source_url 与附件
+              ↓  源页证据→active/intel/manual；标题+Content证据→仅manual；品类不明→本地manual
 4. 校验    创建流 26 字段 / 更新流 14 字段 + 字段证据
               ↓  校验通过才导出 payloads
 5. 推送    默认 DryRun；显式 -Live 生成成功回执，核验回执后才更新 seen
@@ -26,7 +26,7 @@
 |---|---|---|
 | 投标流 | `status: active` 且无指定供应商 | 可投标机会 |
 | 研究流 | `status: intel` 且 `match_level` 为 full/partial/unknown | 单一来源公示、中标/合同公告、已截止公告、采购意向——供中标统计与市场扫描 |
-| 人工线索 | `status: manual` 且 `requires_manual: true` | 页面可访问、品类明确但第三方脱敏，进入飞书待人工补充；仍走创建Webhook |
+| 人工线索 | `status: manual` 且 `requires_manual: true` | 第三方页面已核实但脱敏，或标题明确招采且Doubao Content明确品类，进入飞书待人工补充；仍走创建Webhook |
 
 ## 目录结构
 
@@ -42,7 +42,7 @@
 | `config/doubao.example.json` | 检索配置模板；复制为 `config/doubao.json`（已 gitignore）填 API Key |
 | `data/seen.json` | 去重表，存全量字段（更新流的原值回填依赖它） |
 | `data/query_stats.json` | 每日每条 query 的 raw / unique / pushed 归因统计，裁撤零贡献 query 的依据 |
-| `evals/` | 7 条 eval、75 条断言、5 个 fixture |
+| `evals/` | 覆盖全量检索、更新流、附件提取、自动模式、第三方脱敏与Doubao证据兜底 |
 
 ## 安装
 

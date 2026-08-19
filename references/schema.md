@@ -110,7 +110,7 @@
 
 - `active`：公告有效、截止未过、清单匹配、可投标——投标流
 - `intel`：单一来源公示 / 中标公告 / 合同公告 / 采购意向（含招标意向等探索性公告）/ **已截止的招标与采购公告**——不可投标但具情报价值，填 designated_supplier / winner / award_amount——研究流
-- `manual`：第三方页面可访问且目标品类明确（`match_level`必须为`full`或`partial`），但采购人、截止时间等字段被脱敏；`requires_manual=true`，进入飞书待人工补充，不计入可投标机会
+- `manual`：目标品类明确（`match_level`必须为`full`或`partial`），但采购人、截止时间等字段被脱敏或源页无法访问；允许两类证据：已访问第三方页面的`verification_level=source`，或标题有招采意图且Doubao Summary/Content命中目标品类的`verification_level=search_content`。`requires_manual=true`，进入飞书待人工补充，不计入可投标机会
 - `closed`：已推送的 active 记录截止后经更新流转 closed、或项目处理完毕——吸收原 `expired`；**新检索发现的已截止公告不建 closed，直接走 intel 研究流**
 - `canceled`：采购取消 / 废标 / 公告撤销
 
@@ -164,6 +164,8 @@
 
 ## 运行时证据（不进飞书载荷）
 
-模型提交创建或更新判断时，必须同时提供 `evidence.source_verified=true`、核实时间和非空 `field_evidence`；格式见 `references/verification.md`。这些证据只保存在批次结果中，由 `scripts/tender_pipeline.py` 校验后剥离。第三方页面可访问、目标品类明确但字段脱敏时可创建`status: manual`；页面无法访问或品类无法确认时使用`decision: manual`，不得生成载荷。
+模型提交创建或更新判断时，必须同时提供带时区的`checked_at`和非空`field_evidence`；格式见 `references/verification.md`。正常证据使用`source_verified=true`与`verification_level=source`（旧结果未填level时按source兼容）。仅新建`status: manual`可使用`source_verified=false`、`verification_level=search_content`和候选`content_path`。该兜底必须同时通过标题招采意图与Doubao Summary/Content目标品类复核，脚本会归档`content_sha256`与`category_signals`。`active`、`intel`和更新流必须使用source证据。
+
+这些证据只保存在批次结果中，由 `scripts/tender_pipeline.py` 校验后剥离，不进入飞书载荷。只有标题、只有笼统Content或品类无法确认时使用`decision: manual`，不得生成载荷。
 
 新建 `active` 记录还必须满足：`match_level` 为 `full` 或 `partial`、`deadline` 已核实且非 `"null"`、`designated_supplier` 为 `"null"`。这些约束由脚本执行，不能靠人工绕过。

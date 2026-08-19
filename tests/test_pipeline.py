@@ -100,6 +100,8 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(len(batch["candidates"]), 1)
             self.assertEqual(len(batch["candidates"][0]["cluster_members"]), 2)
             self.assertIn("不可信数据", batch["untrusted_data_warning"])
+            self.assertEqual(batch["evidence_policy"]["source_required_for"], ["active", "intel", "update"])
+            self.assertIn("只能创建manual", batch["required_output"])
 
     def test_submit_manual_batch_reaches_validated_without_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,6 +216,127 @@ class PipelineTest(unittest.TestCase):
         record["requires_manual"] = False
         errors = tender_pipeline.validate_create(record, evidence, "record")
         self.assertTrue(any("requires_manual=true" in error for error in errors))
+
+    def test_doubao_title_and_content_can_create_manual_when_source_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            search = self.make_search_dir(root)
+            full_content = search / "content" / "CNEW000000001.json"
+            content_data = json.loads(full_content.read_text(encoding="utf-8"))
+            content_data["content"] = "采购清单包含过敏原特异性IgE抗体检测试剂盒，来源页面暂时无法打开。"
+            write_json(full_content, content_data)
+            seen = root / "seen.json"
+            write_json(seen, {"records": []})
+            pipeline_dir, _ = tender_pipeline.prepare(search, seen, 5, "report-only")
+            batch = json.loads((pipeline_dir / "batches" / "batch-0001.json").read_text(encoding="utf-8"))
+            candidate = batch["candidates"][0]
+            self.assertIn("过敏原sIgE试剂", candidate["search_evidence"]["target_category_signals"])
+
+            record = {field: "null" for field in tender_pipeline.CREATE_FIELDS}
+            record.update({
+                "title": candidate["title"], "record_id": "T20260819-SEA234",
+                "region": "未知或非传统大区", "purchaser": tender_pipeline.MASKED_PURCHASER,
+                "category": "试剂", "budget": 0, "days_left": 0, "award_amount": 0,
+                "requires_manual": True, "source_url": candidate["url"], "match_level": "partial",
+                "matched_category": "过敏原sIgE试剂", "status": "manual",
+                "notes": "源页面无法访问；依Doubao标题与Content判定，建议人工核实。",
+            })
+            evidence = {
+                "source_verified": False,
+                "verification_level": "search_content",
+                "content_path": candidate["content_path"],
+                "checked_at": "2026-08-19T10:00:00+08:00",
+                "field_evidence": {
+                    "title": "Doubao返回标题含采购意图",
+                    "purchaser": "Doubao内容未披露采购人",
+                    "source_url": "Doubao返回的候选URL，源页访问失败",
+                    "matched_category": "Doubao Content明确包含过敏原特异性IgE试剂",
+                },
+            }
+            results = root / "results.json"
+            write_json(results, {"results": [{
+                "candidate_id": candidate["candidate_id"], "decision": "create",
+                "record": record, "evidence": evidence,
+            }]})
+            manifest = tender_pipeline.submit_batch(pipeline_dir, "batch-0001", results)
+            self.assertEqual(manifest["create_status_counts"]["manual"], 1)
+            saved = json.loads(Path(manifest["batches"][0]["result_path"]).read_text(encoding="utf-8"))
+            saved_evidence = saved["results"][0]["evidence"]
+            self.assertRegex(saved_evidence["content_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(saved_evidence["category_signals"], ["过敏原sIgE试剂"])
+
+    def test_search_content_fallback_rejects_missing_category_signal_and_active_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            search = self.make_search_dir(root)
+            seen = root / "seen.json"
+            write_json(seen, {"records": []})
+            pipeline_dir, _ = tender_pipeline.prepare(search, seen, 5, "report-only")
+            batch = json.loads((pipeline_dir / "batches" / "batch-0001.json").read_text(encoding="utf-8"))
+            candidate = batch["candidates"][0]
+            record = {field: "null" for field in tender_pipeline.CREATE_FIELDS}
+            record.update({
+                "title": candidate["title"], "record_id": "T20260819-SEA235",
+                "region": "未知或非传统大区", "purchaser": tender_pipeline.MASKED_PURCHASER,
+                "category": "试剂", "budget": 0, "days_left": 0, "award_amount": 0,
+                "requires_manual": True, "source_url": candidate["url"], "match_level": "partial",
+                "matched_category": "过敏原sIgE试剂", "status": "manual", "notes": "待人工核实",
+            })
+            evidence = {
+                "source_verified": False, "verification_level": "search_content",
+                "content_path": candidate["content_path"], "checked_at": "2026-08-19T10:00:00+08:00",
+                "field_evidence": {key: "Doubao检索证据" for key in ("title", "purchaser", "source_url", "matched_category")},
+            }
+            with self.assertRaisesRegex(tender_pipeline.PipelineError, "Content未命中"):
+                tender_pipeline.validate_batch_results(
+                    batch,
+                    {"results": [{"candidate_id": candidate["candidate_id"], "decision": "create", "record": record, "evidence": evidence}]},
+                    "report-only",
+                    search,
+                )
+            record["status"] = "active"
+            record["requires_manual"] = False
+            record["deadline"] = "2026-08-28T09:00:00+08:00"
+            with self.assertRaisesRegex(tender_pipeline.PipelineError, "search_content兜底只能"):
+                tender_pipeline.validate_batch_results(
+                    batch,
+                    {"results": [{"candidate_id": candidate["candidate_id"], "decision": "create", "record": record, "evidence": evidence}]},
+                    "report-only",
+                    search,
+                )
+
+    def test_non_tender_science_and_marketing_titles_are_screened_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            search = root / "search"
+            search.mkdir()
+            rows = [
+                ("CSCIENCE00001", "过敏原检测研究进展"),
+                ("CMARKETING001", "化学发光产品介绍"),
+            ]
+            index_rows = []
+            for candidate_id, title in rows:
+                url = f"https://example.test/{candidate_id}"
+                row = {
+                    "candidate_id": candidate_id, "title": title, "title_fingerprint": title,
+                    "site_name": "资讯站", "url": url, "publish_time": "2026-08-19",
+                    "auth_info_level": 0, "auth_info_des": "", "rank_score": 0.1,
+                    "found_by_query": [1], "teaser": "科普或营销内容",
+                    "content_path": f"content/{candidate_id}.json",
+                }
+                index_rows.append(row)
+                write_json(search / row["content_path"], {
+                    "candidate_id": candidate_id, "title": title, "source_url": url,
+                    "summary": row["teaser"], "content": row["teaser"],
+                })
+            (search / "candidate_index.jsonl").write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in index_rows), encoding="utf-8"
+            )
+            seen = root / "seen.json"
+            write_json(seen, {"records": []})
+            _, manifest = tender_pipeline.prepare(search, seen, 5, "report-only")
+            self.assertEqual(manifest["counts"]["queued"], 0)
+            self.assertEqual(manifest["counts"]["screened_out"], 2)
 
     def test_confirmed_receipt_updates_seen_once(self):
         with tempfile.TemporaryDirectory() as tmp:
