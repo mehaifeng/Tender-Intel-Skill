@@ -25,6 +25,7 @@
 退出码: 0 成功 / 1 配置或参数错误 / 2 清单校验不通过 / 3 API 额度或鉴权失败
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -34,8 +35,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
-
-import requests
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -98,6 +99,7 @@ FALLBACK = {
     "need_content": 0,
     "sites": None,
     "block_hosts": None,
+    "report_limit": 20,
 }
 
 
@@ -254,20 +256,31 @@ class RateLimiter:
             time.sleep(sleep_for)
 
 
-def call_once(session, endpoint, api_key, payload, limiter):
+def call_once(endpoint, api_key, payload, limiter):
     limiter.wait()
-    r = session.post(
-        endpoint,
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = Request(
+        endpoint, data=data, method="POST",
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        timeout=40,
     )
-    if r.status_code != 200:
-        return None, f"HTTP {r.status_code}: {r.text[:200]}", None
-    body = r.json()
+    try:
+        with urlopen(request, timeout=40) as response:
+            status = response.getcode()
+            raw = response.read()
+    except HTTPError as e:
+        detail = e.read(200).decode("utf-8", errors="replace")
+        return None, f"HTTP {e.code}: {detail}", None
+    except (URLError, TimeoutError, OSError) as e:
+        return None, f"网络错误: {e}", None
+    if status != 200:
+        return None, f"HTTP {status}: {raw[:200].decode('utf-8', errors='replace')}", None
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        return None, f"响应JSON无效: {e}", None
     err = (body.get("ResponseMetadata") or {}).get("Error")
     if err:
         code = err.get("CodeN") or err.get("Code")
@@ -279,13 +292,13 @@ def call_once(session, endpoint, api_key, payload, limiter):
     return body.get("Result") or {}, None, None
 
 
-def run_query(session, endpoint, api_key, num, query, args, time_range, limiter, abort):
+def run_query(endpoint, api_key, num, query, args, time_range, limiter, abort):
     payload = build_payload(query, args, time_range)
     last_err = None
     for attempt in range(1, MAX_RETRY + 1):
         if abort.is_set():
             return {"num": num, "query": query, "error": "已中止（其他 query 触发致命错误）", "results": []}
-        result, err, code = call_once(session, endpoint, api_key, payload, limiter)
+        result, err, code = call_once(endpoint, api_key, payload, limiter)
         if err is None:
             return {
                 "num": num,
@@ -339,6 +352,62 @@ def dedup_candidates(runs):
     for url in order:
         by_url[url]["found_by_query"].sort()
     return [by_url[u] for u in order]
+
+
+def candidate_id(url):
+    """稳定候选编号；同一 URL 跨运行保持一致，便于按需读取正文。"""
+    return "C" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:12].upper()
+
+
+def title_fingerprint(title):
+    """保守的转载聚类键：只折叠空白和常见标点，不做模糊合并。"""
+    return re.sub(r"[\s\W_]+", "", (title or "").lower(), flags=re.UNICODE)
+
+
+def write_candidate_artifacts(candidates, out_dir, run_date):
+    """正文逐条落盘，另写不含全文的轻量索引，禁止模型整体读取正文库。"""
+    content_dir = out_dir / "content"
+    content_dir.mkdir(parents=True, exist_ok=True)
+    index = []
+    for item in candidates:
+        cid = candidate_id(item["url"])
+        content_rel = f"content/{cid}.json"
+        full = {
+            "candidate_id": cid,
+            "title": item["title"],
+            "source_url": item["url"],
+            "summary": item["summary"],
+            "content": item["content"],
+        }
+        (out_dir / content_rel).write_text(
+            json.dumps(full, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        teaser_source = item["summary"] or item["content"]
+        index.append({
+            "candidate_id": cid,
+            "title": item["title"],
+            "title_fingerprint": title_fingerprint(item["title"]),
+            "site_name": item["site_name"],
+            "url": item["url"],
+            "publish_time": item["publish_time"],
+            "auth_info_level": item["auth_info_level"],
+            "auth_info_des": item["auth_info_des"],
+            "rank_score": item["rank_score"],
+            "found_by_query": item["found_by_query"],
+            "teaser": truncate(teaser_source, 240),
+            "content_path": content_rel,
+        })
+
+    with (out_dir / "candidate_index.jsonl").open("w", encoding="utf-8") as f:
+        for item in index:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    # 保留原文件名供旧流程兼容，但内容改为轻量索引，不再复制正文。
+    (out_dir / "candidates.json").write_text(
+        json.dumps({"run_date": run_date, "count": len(index), "candidates": index},
+                   ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return index
 
 
 def compute_stats(runs, candidates):
@@ -411,8 +480,9 @@ def report(runs, candidates, stats, out_dir, args, time_range, key_source):
         levels[c["auth_info_des"] or "未知"] = levels.get(c["auth_info_des"] or "未知", 0) + 1
     print("\n候选按信源权威度：" + "，".join(f"{k} {v}" for k, v in sorted(levels.items())))
 
-    print(f"\n候选清单（{len(candidates)} 条）：")
-    for i, c in enumerate(candidates, 1):
+    limit = len(candidates) if args.report_all else min(args.report_limit, len(candidates))
+    print(f"\n候选预览（显示 {limit}/{len(candidates)} 条；完整轻量索引见 candidate_index.jsonl）：")
+    for i, c in enumerate(candidates[:limit], 1):
         fbq = ",".join(f"#{n}" for n in c["found_by_query"])
         print(f"{i:>3}. {truncate(c['title'], 48)}")
         print(
@@ -420,6 +490,8 @@ def report(runs, candidates, stats, out_dir, args, time_range, key_source):
             f" {c['auth_info_des'] or '-':<6} {fbq}"
         )
         print(f"     {c['url']}")
+    if limit < len(candidates):
+        print(f"  … 其余 {len(candidates) - limit} 条未写入 stdout，避免占用模型上下文")
 
 
 # ---------------------------------------------------------------- main
@@ -441,6 +513,8 @@ def main():
     p.add_argument("--need-url", type=int, choices=[0, 1], help="1=只要有落地页URL的结果（默认）")
     p.add_argument("--need-content", type=int, choices=[0, 1], help="1=只要有正文的结果")
     p.add_argument("--out-dir", help="落盘目录，默认 .tmp/search/<日期>")
+    p.add_argument("--report-limit", type=int, help="stdout 最多预览候选数（默认 20）")
+    p.add_argument("--report-all", action="store_true", help="打印全部候选；模型运行时禁止使用")
     p.add_argument("--no-stats", action="store_true", help="不写 data/query_stats.json")
     p.add_argument("--dry-run", action="store_true", help="只校验清单与参数，不发请求")
     args = p.parse_args()
@@ -453,6 +527,9 @@ def main():
 
         if not 1 <= args.count <= 50:
             print(f"错误：--count 需在 1~50 之间（官方上限 50），给了 {args.count}", file=sys.stderr)
+            return 1
+        if args.report_limit < 0:
+            print(f"错误：--report-limit 不能小于 0，给了 {args.report_limit}", file=sys.stderr)
             return 1
 
         time_range = None if args.time_range == "none" else build_time_range(args.time_range)
@@ -487,11 +564,10 @@ def main():
 
         limiter = RateLimiter(QPS)
         abort = threading.Event()
-        session = requests.Session()
         started = time.time()
         with ThreadPoolExecutor(max_workers=4) as pool:
             runs = list(pool.map(
-                lambda nq: run_query(session, endpoint, api_key, nq[0], nq[1],
+                lambda nq: run_query(endpoint, api_key, nq[0], nq[1],
                                      args, time_range, limiter, abort),
                 queries,
             ))
@@ -510,15 +586,31 @@ def main():
                         "time_range": time_range, "count": args.count,
                         "auth_level": args.auth_level, "runs": runs},
                        ensure_ascii=False, indent=2), encoding="utf-8")
-        (out_dir / "candidates.json").write_text(
-            json.dumps({"run_date": run_date, "count": len(candidates),
-                        "candidates": candidates}, ensure_ascii=False, indent=2),
-            encoding="utf-8")
+        lightweight_candidates = write_candidate_artifacts(candidates, out_dir, run_date)
+        failed_runs = [r for r in runs if r.get("error")]
+        (out_dir / "search_summary.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "run_date": run_date,
+                "time_range": time_range,
+                "query_count": len(runs),
+                "query_succeeded": len(runs) - len(failed_runs),
+                "query_failed": len(failed_runs),
+                "failures": [
+                    {"num": r["num"], "query": r["query"], "error": r["error"]}
+                    for r in failed_runs
+                ],
+                "raw_result_count": sum(len(r["results"]) for r in runs),
+                "candidate_count": len(lightweight_candidates),
+                "query_stats": stats,
+            }, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
         if not args.no_stats and not args.query:
             write_stats(stats, run_date)
 
-        report(runs, candidates, stats, out_dir, args, time_range, key_source)
+        report(runs, lightweight_candidates, stats, out_dir, args, time_range, key_source)
         print(f"\n耗时 {elapsed:.1f}s")
 
         if fatal:

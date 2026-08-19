@@ -1,6 +1,3 @@
-# MCP 配置含 API 密钥，禁止提交；参照 .mcp.json.example 在本地创建
-.mcp.json
-
 # 豆包搜索直连配置含 API Key，禁止提交；参照 config/doubao.example.json 在本地创建
 config/doubao.json
 

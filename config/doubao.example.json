@@ -22,7 +22,7 @@
     "time_range": "45d 这类滚动窗口 / OneDay|OneWeek|OneMonth|OneYear / 2026-08-01..2026-08-10 闭区间",
     "auth_level": "官方请求侧只有 0=不限制、1=仅非常权威。0 才是本管线要的（一手源 + 第三方聚合站都要）",
     "need_url": "true = 只要有落地页 URL 的结果，滤掉火山如意卡片。本管线必须为 true",
-    "need_content": "true = 只要有正文的结果。默认 false，不额外收窄召回",
+    "need_content": "true = 只要搜索API返回正文的结果。默认false，不额外收窄召回；即使为true，create/update前仍必须访问source_url核实",
     "sites": "站点白名单，最多 20 个完整域名。留空 = 全网",
     "block_hosts": "噪声域名（2026-08-18 实测：这 5 个域名贡献了 638 条候选里的 185 条 = 29%，全部不是招标公告——药智网注册证库、生物器材/生物在线产品页、头条科普文、赛默飞产品目录）。API 上限 5 个"
   }

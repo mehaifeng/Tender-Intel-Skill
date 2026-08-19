@@ -1,0 +1,6 @@
+interface:
+  display_name: "招标情报"
+  short_description: "检索、核实并安全整理IVD招标情报"
+  default_prompt: "Use $tender-intel to 检索并核实今天的IVD招标情报，先生成简报，不要推送。"
+policy:
+  allow_implicit_invocation: true

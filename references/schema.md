@@ -60,8 +60,8 @@
 | days_left | number | 剩余天数；已截止填 `0` |
 | contact | string | 联系人及电话（一般在公告末尾，采购人与代理机构各一段）；正文确实没有才填 `"null"`，并在 notes 注明 |
 | source_url | string | 原文 URL（核实路径，必填，不填 "null"） |
-| attachment | string | 主文件直链，**必须是绝对 URL**——相对路径要用 source_url 的 scheme+host 补全；跨域 OSS/CDN 链接照收；提取方法见 SKILL.md 阶段 3「附件提取」；多余附件放 notes；grep 零命中才填 `"null"` 并在 notes 注明 |
-| match_level | string | `full` / `partial` / `none` / `unknown` |
+| attachment | string | 主文件直链，**必须是绝对 URL**——相对路径要用 source_url 的 scheme+host 补全；跨域 OSS/CDN 链接照收；提取方法见 `references/verification.md`；多余附件放 notes；grep 零命中才填 `"null"` 并在 notes 注明 |
+| match_level | string | `full` / `partial` / `unknown`；明确不匹配时使用`exclude`，不得创建记录 |
 | matched_category | string | 细分类单选，枚举见 keywords.md；多类命中取最相关一个，其余放 notes |
 | status | string | 单选：`active`（可投标）/ `intel`（情报）/ `closed`（已结束）/ `canceled`（取消/废标） |
 | requires_manual | bool | 验证码/登录墙/反爬等无法自动核实为 `true`，否则 `false` |
@@ -160,3 +160,9 @@
 ## 零命中约定
 
 无任何有效条目时**不推送**（避免飞书堆积无意义记录），仅在执行摘要中说明"今日无新增有效条目"。
+
+## 运行时证据（不进飞书载荷）
+
+模型提交创建或更新判断时，必须同时提供 `evidence.source_verified=true`、核实时间和非空 `field_evidence`；格式见 `references/verification.md`。这些证据只保存在批次结果中，由 `scripts/tender_pipeline.py` 校验后剥离。原文无法核实时使用 `decision: manual`，不得生成可推送载荷。
+
+新建 `active` 记录还必须满足：`match_level` 为 `full` 或 `partial`、`deadline` 已核实且非 `"null"`、`designated_supplier` 为 `"null"`。这些约束由脚本执行，不能靠人工绕过。
