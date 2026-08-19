@@ -76,7 +76,11 @@ python scripts/tender_pipeline.py status --run-dir <检索落盘目录>
 python scripts/tender_pipeline.py next-batch --run-dir <检索落盘目录>
 ```
 
-只处理`next-batch`返回的文件。按 `references/verification.md` 核实source_url和附件，按 `references/schema.md` 生成记录与字段证据。原文无法核实时输出`manual`，不得生成可推送记录。
+只处理`next-batch`返回的文件。按 `references/verification.md` 核实source_url和附件，按 `references/schema.md` 生成记录与字段证据。
+
+- 第三方页面可访问、目标品类可以确认、但采购人等字段被脱敏时：输出`decision: create`，记录使用`status: manual`、`requires_manual: true`，走创建流推送飞书。
+- 页面无法访问、搜索内容与页面不一致或连目标品类都不能确认时：输出`decision: manual`，只进入本地人工队列，不生成载荷。
+- 不得把`decision: manual`与飞书字段`status: manual`混为一谈。
 
 把本批结果写成JSON后提交：
 
@@ -109,7 +113,7 @@ python scripts/tender_pipeline.py record-push --run-dir <检索落盘目录> --r
 
 ## 6. 完成条件
 
-完成前确认：Query失败已披露；所有批次进入终态；所有创建/更新载荷通过校验；生产推送逐条记录HTTP与飞书返回；seen只在确认成功后原子更新；摘要列出Query数、候选数、历史跳过、明确排除、manual、创建、更新、失败及归因。
+完成前确认：Query失败已披露；所有批次进入终态；所有创建/更新载荷通过校验；生产推送逐条记录HTTP与飞书返回；seen只在确认成功后原子更新；摘要分别列出`active`、`intel`、飞书`status: manual`、本地`decision: manual`、排除、更新、失败及归因。
 
 ## 按需参考
 

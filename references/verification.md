@@ -25,7 +25,7 @@
 - 单一来源、采购意向、中标、合同及已截止公告走 `intel`，不作为可投标 `active`。
 - 联系人和电话从正文末尾提取；没有时填字符串 `"null"` 并在notes说明。
 - 附件必须是绝对URL；HTML里零命中才允许填 `"null"`。
-- 第三方或聚合来源在notes标明“建议以采购方公告为准”。
+- 第三方或聚合来源在notes标明“建议以采购方公告为准”。页面可访问且目标品类明确、但字段被脱敏时，不要丢弃，按下文`status: manual`规则创建。
 
 ## 批次结果格式
 
@@ -57,6 +57,27 @@
 
 `decision`填`update`，`record`严格使用 `references/schema.md` 的更新流14字段；未变更字段从seen记录回填原值。证据至少覆盖`source_url`、`notice_type`、`publish_date`以及本次变更的状态/截止/中标字段。
 
+### 第三方脱敏线索推送
+
+同时满足以下条件时使用`decision: create`并生成飞书`status: manual`记录：
+
+- 第三方页面实际可访问，页面标题与候选一致；`source_verified`可为`true`，它表示已核实该第三方页面，不代表已取得官方原文。
+- 页面可见内容足以确认目标试剂或仪器；不能只凭通用“医疗采购”“试剂一批”推断。
+- 缺失确因页面脱敏或未披露，不是抓取失败。
+
+固定填法：
+
+- `status`: `"manual"`
+- `requires_manual`: `true`
+- `match_level`: 必须为`"full"`或`"partial"`；无法确认目标品类时不得推送
+- `purchaser`: 无法识别时填`"未披露（第三方脱敏）"`
+- `region`: 无法从已知信息判断时填`"未知或非传统大区"`
+- 其他缺失字符串填`"null"`、数字填`0`
+- `notes`: 必须列出脱敏字段、第三方来源，并写“建议人工核实，以采购方公告为准”
+- `evidence.field_evidence`: `purchaser`等脱敏字段写明“页面显示已脱敏/未披露”，不得编造值
+
+这类记录走创建Webhook并进入seen，摘要单独统计为“飞书manual”，不得计入可投标`active`。
+
 ### 排除或人工处理
 
 ```json
@@ -67,7 +88,7 @@
 {"candidate_id":"C123456789ABC","decision":"manual","reason":"原文登录墙，无法核实截止时间与品类"}
 ```
 
-`exclude`/`manual`不得携带`record`。搜索正文与原文不一致、原文打不开或附件无法确认品类时，优先使用`manual`，不得为完成数量而猜测。
+`exclude`/`manual`不得携带`record`。这里的`decision: manual`仅指不推送的本地人工队列。搜索正文与页面不一致、页面打不开或目标品类无法确认时使用它，不得为完成数量而伪造成飞书`status: manual`。
 
 ## 附件机械提取
 

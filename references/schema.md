@@ -47,7 +47,7 @@
 | record_id | string | skill 端生成的记录唯一编码，格式 `T`+yyyyMMdd+`-`+6位随机大写字母数字（剔除 0/O/1/I），如 `T20260811-K7X2P9`；创建时生成、写 seen.json、永不改变，作为飞书记录定位键；必填 |
 | region | string | 大区单选：按采购人所在省份判定，枚举见"大区判定"；无法判定填 `未知或非传统大区` |
 | project_code | string | 项目编号；无则 `"null"` |
-| purchaser | string | 采购人 |
+| purchaser | string | 采购人；仅第三方页面明确脱敏且记录为`status: manual`时允许填`"未披露（第三方脱敏）"` |
 | agency | string | 代理机构；无则 `"null"` |
 | procurement_method | string | 采购方式：公开招标/竞争性谈判/竞争性磋商/询价/单一来源/院内比选等 |
 | notice_type | string | 公告类型：招标公告/更正公告/单一来源公示/中标公告/合同公告/采购意向等 |
@@ -63,8 +63,8 @@
 | attachment | string | 主文件直链，**必须是绝对 URL**——相对路径要用 source_url 的 scheme+host 补全；跨域 OSS/CDN 链接照收；提取方法见 `references/verification.md`；多余附件放 notes；grep 零命中才填 `"null"` 并在 notes 注明 |
 | match_level | string | `full` / `partial` / `unknown`；明确不匹配时使用`exclude`，不得创建记录 |
 | matched_category | string | 细分类单选，枚举见 keywords.md；多类命中取最相关一个，其余放 notes |
-| status | string | 单选：`active`（可投标）/ `intel`（情报）/ `closed`（已结束）/ `canceled`（取消/废标） |
-| requires_manual | bool | 验证码/登录墙/反爬等无法自动核实为 `true`，否则 `false` |
+| status | string | 单选：`active`（可投标）/ `intel`（情报）/ `manual`（第三方脱敏、需人工补充）/ `closed`（已结束）/ `canceled`（取消/废标） |
+| requires_manual | bool | `status: manual`必须为`true`；其他记录有待人工复核时也可为`true` |
 | designated_supplier | string | 单一来源拟定供应商；无则 `"null"` |
 | winner | string | 中标供应商；无则 `"null"` |
 | award_amount | number | 中标/成交金额；无则 `0` |
@@ -110,10 +110,11 @@
 
 - `active`：公告有效、截止未过、清单匹配、可投标——投标流
 - `intel`：单一来源公示 / 中标公告 / 合同公告 / 采购意向（含招标意向等探索性公告）/ **已截止的招标与采购公告**——不可投标但具情报价值，填 designated_supplier / winner / award_amount——研究流
+- `manual`：第三方页面可访问且目标品类明确（`match_level`必须为`full`或`partial`），但采购人、截止时间等字段被脱敏；`requires_manual=true`，进入飞书待人工补充，不计入可投标机会
 - `closed`：已推送的 active 记录截止后经更新流转 closed、或项目处理完毕——吸收原 `expired`；**新检索发现的已截止公告不建 closed，直接走 intel 研究流**
 - `canceled`：采购取消 / 废标 / 公告撤销
 
-已移除：`manual`（职责并入 `requires_manual: true`）；`expired`（并入 `closed`）。
+已移除：`expired`（并入 `closed`）。注意飞书字段`status: manual`是可推送记录；批次`decision: manual`是不推送的本地人工队列，两者不同。
 
 ## 更新流 JSON 结构（飞书更新 Webhook，2026-08-11 定稿）
 
@@ -163,6 +164,6 @@
 
 ## 运行时证据（不进飞书载荷）
 
-模型提交创建或更新判断时，必须同时提供 `evidence.source_verified=true`、核实时间和非空 `field_evidence`；格式见 `references/verification.md`。这些证据只保存在批次结果中，由 `scripts/tender_pipeline.py` 校验后剥离。原文无法核实时使用 `decision: manual`，不得生成可推送载荷。
+模型提交创建或更新判断时，必须同时提供 `evidence.source_verified=true`、核实时间和非空 `field_evidence`；格式见 `references/verification.md`。这些证据只保存在批次结果中，由 `scripts/tender_pipeline.py` 校验后剥离。第三方页面可访问、目标品类明确但字段脱敏时可创建`status: manual`；页面无法访问或品类无法确认时使用`decision: manual`，不得生成载荷。
 
 新建 `active` 记录还必须满足：`match_level` 为 `full` 或 `partial`、`deadline` 已核实且非 `"null"`、`designated_supplier` 为 `"null"`。这些约束由脚本执行，不能靠人工绕过。

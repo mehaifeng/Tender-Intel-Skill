@@ -51,8 +51,9 @@ MATCHED_CATEGORIES = {
     "化学发光免疫分析仪", "全自动酶免工作站/酶免仪", "酶标仪", "洗板机",
     "其他免疫分析仪器", "配套耗材", "其他",
 }
-CREATE_STATUSES = {"active", "intel"}
-UPDATE_STATUSES = {"active", "intel", "closed", "canceled"}
+CREATE_STATUSES = {"active", "intel", "manual"}
+UPDATE_STATUSES = {"active", "intel", "manual", "closed", "canceled"}
+MASKED_PURCHASER = "未披露（第三方脱敏）"
 CHANGE_TYPES = {"status_change", "deadline_change", "correction"}
 UPDATE_RE = re.compile(r"中标|成交|废标|流标|更正|变更|合同公告|终止|撤销")
 CLEAR_EXCLUDES = [
@@ -418,6 +419,8 @@ def compact_status(manifest):
         value["search"] = manifest["search"]
     if manifest.get("decision_counts"):
         value["decision_counts"] = manifest["decision_counts"]
+    if manifest.get("create_status_counts"):
+        value["create_status_counts"] = manifest["create_status_counts"]
     if manifest.get("push_counts"):
         value["push_counts"] = manifest["push_counts"]
     return value
@@ -497,7 +500,7 @@ def validate_create(record, evidence, label):
     if record["matched_category"] not in MATCHED_CATEGORIES:
         errors.append(f"{label}.matched_category 枚举无效")
     if record["status"] not in CREATE_STATUSES:
-        errors.append(f"{label}.status 新建只能是 active/intel")
+        errors.append(f"{label}.status 新建只能是 active/intel/manual")
     if record["source_url"] in ("", "null") or not re.match(r"https?://", record["source_url"]):
         errors.append(f"{label}.source_url 必须是 http(s) URL")
     for key in ("title", "purchaser"):
@@ -510,6 +513,13 @@ def validate_create(record, evidence, label):
             errors.append(f"{label}: active 必须有已核实的 deadline")
         if record["designated_supplier"] != "null":
             errors.append(f"{label}: active 不能有指定供应商")
+    if record["status"] == "manual":
+        if record["requires_manual"] is not True:
+            errors.append(f"{label}: manual 必须设置 requires_manual=true")
+        if record["match_level"] not in {"full", "partial"}:
+            errors.append(f"{label}: manual 必须已确认目标品类，match_level只能是full/partial")
+        if record["notes"] == "null":
+            errors.append(f"{label}: manual 必须在notes说明脱敏字段与人工核实原因")
     errors.extend(validate_evidence(evidence, label))
     required = {"title", "purchaser", "source_url", "matched_category"}
     if record["status"] == "active":
@@ -593,6 +603,7 @@ def export_payloads(pipeline_dir, manifest):
     create_dir.mkdir(parents=True, exist_ok=True)
     update_dir.mkdir(parents=True, exist_ok=True)
     counts = {"create": 0, "update": 0, "exclude": 0, "manual": 0}
+    create_status_counts = {"active": 0, "intel": 0, "manual": 0}
     payload_entries = []
     for batch in manifest["batches"]:
         if batch["status"] != "completed":
@@ -603,6 +614,8 @@ def export_payloads(pipeline_dir, manifest):
             decision = row["decision"]
             counts[decision] += 1
             if decision in {"create", "update"}:
+                if decision == "create":
+                    create_status_counts[row["record"]["status"]] += 1
                 target = create_dir if decision == "create" else update_dir
                 payload_path = target / f"{row['candidate_id']}.json"
                 atomic_write_json(payload_path, row["record"])
@@ -613,6 +626,7 @@ def export_payloads(pipeline_dir, manifest):
                     "sha256": sha256_file(payload_path),
                 })
     manifest["decision_counts"] = counts
+    manifest["create_status_counts"] = create_status_counts
     manifest["payload_dir"] = str(payload_root)
     manifest["payloads"] = payload_entries
 

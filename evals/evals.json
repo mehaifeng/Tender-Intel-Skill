@@ -4,7 +4,7 @@
     {
       "id": 1,
       "prompt": "跑一遍今天的招标情报：用豆包检索我们业务相关的招投标信息（过敏原/自身免疫IVD试剂和免疫分析仪器），核实后按定稿JSON推送到飞书webhook，最后给我执行摘要。",
-      "expected_output": "完成检索→去重→核实→结构化→推送全流程；每条有效项单独POST一个平铺JSON对象（不是数组），字段符合schema.md：无嵌套、无JSON null（空字符串填\"null\"、空数字填0）、含skill端生成的record_id；只推status为active或intel的记录；每条推送成功（HTTP 200且code:0）后把全量字段写入data/seen.json；输出摘要含执行的query条数（固定49条）、跨查询去重后候选数、去重表跳过数、核实后有效数、剔除条目及原因、逐条推送的HTTP状态码与飞书返回、推送记录按status（active/intel）的分布，以及各query的unique贡献归因。",
+      "expected_output": "完成检索→去重→核实→结构化→推送全流程；每条有效项单独POST一个平铺JSON对象（不是数组），字段符合schema.md：无嵌套、无JSON null（空字符串填\"null\"、空数字填0）、含skill端生成的record_id；推送status为active、intel或符合第三方脱敏规则的manual记录；每条推送成功（HTTP 200且code:0）后把全量字段写入data/seen.json；输出摘要含执行的query条数（固定49条）、跨查询去重后候选数、去重表跳过数、核实后有效数、剔除条目及原因、逐条推送的HTTP状态码与飞书返回、推送记录按status的分布，以及各query的unique贡献归因。",
       "files": [],
       "expectations": [
         "执行了keywords.md §5全部49条query，一条不漏、一条不改，没有按星期挑组、没有自行删减或合并",
@@ -23,7 +23,7 @@
         "每条载荷都含record_id，格式为T+yyyyMMdd+-+6位大写字母数字，且不含字符0、O、1、I",
         "载荷中不出现JSON null：空字符串字段填\"null\"、空数字字段填0、布尔字段填false",
         "载荷的region、category、matched_category、status取值都在schema.md与keywords.md的枚举范围内",
-        "推送的记录status只有active或intel两种取值，没有新建match_level为none的记录",
+        "推送记录的status只能是active、intel或manual；manual必须requires_manual=true且match_level为full/partial，没有新建match_level为none的记录",
         "生产推送显式使用-Live与-ManifestPath，脚本生成绑定载荷SHA-256的成功回执；随后由record-push复核HTTP 200、code:0、模式、路径和哈希后才写data/seen.json与push_ledger.json，失败条目没有写入",
         "飞书载荷里不含found_by_query、dedup_key、first_seen、last_seen、pushed这5个seen.json专属字段——它们只写seen.json，其中found_by_query是数组会直接触发飞书字段识别错误",
         "执行摘要包含：query条数（应为49条）、去重后候选数、去重表跳过数（含其中后续公告数）、核实后有效数、剔除条目及原因、逐条HTTP状态码与飞书返回、推送记录按status的分布，以及归因摘要（unique>0的query编号与各自贡献数、unique为0的query编号）",
@@ -115,6 +115,24 @@
         "将模糊的今天招标情报请求自动解释为report-only，并使用默认49条全量检索和5条批次",
         "没有因为措辞不明确而暂停；缺少可选信息时使用Skill默认值继续执行",
         "没有传-Live或向飞书Webhook发送生产请求；只有用户明确要求飞书写入时才允许扩大到daily-push或update-only"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "离线评估，不要连接生产飞书。把evals/files/page_third_party_masked.html视为已成功访问的第三方招标页面，source_url为https://example.test/tender/masked-ige。按当前Skill处理并生成可校验载荷。",
+      "expected_output": "页面可访问且明确包含过敏原特异性IgE试剂，只是采购人、截止时间等被脱敏；因此使用decision:create生成status:manual的26字段创建载荷，而不是decision:manual本地搁置；只做离线校验，不连接生产Webhook。",
+      "files": ["evals/files/page_third_party_masked.html"],
+      "expectations": [
+        "使用decision=create并生成创建流载荷，没有把该条误判为不推送的decision=manual",
+        "status为manual且requires_manual为true",
+        "purchaser为固定值\"未披露（第三方脱敏）\"，没有编造医院名称",
+        "region为\"未知或非传统大区\"，deadline、contact、project_code等未披露字符串字段填\"null\"，数字字段填0",
+        "match_level为full或partial，matched_category为过敏原sIgE试剂，因为页面正文明确写出目标品类",
+        "evidence.source_verified为true，含带时区checked_at，并在purchaser证据中注明页面脱敏",
+        "notes列出脱敏字段、第三方来源，并注明建议人工核实、以采购方公告为准",
+        "载荷恰好包含创建流26字段、平铺且没有JSON null",
+        "通过tender_pipeline.py校验并计入create_status_counts.manual",
+        "只做DryRun，没有传-Live或连接生产Webhook"
       ]
     }
   ]

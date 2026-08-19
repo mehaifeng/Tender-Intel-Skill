@@ -14,7 +14,7 @@
 2. 排队    tender_pipeline.py 做 seen 去重、保守预筛、转载聚类和 5 条一批
               ↓  manifest 状态机可中断续跑
 3. 核实    模型只读取当前批次；source_url 与附件必须核实
-              ↓  无法核实转 manual，不生成可推送记录
+              ↓  第三方脱敏但品类明确→飞书manual；打不开或品类不明→本地manual
 4. 校验    创建流 26 字段 / 更新流 14 字段 + 字段证据
               ↓  校验通过才导出 payloads
 5. 推送    默认 DryRun；显式 -Live 生成成功回执，核验回执后才更新 seen
@@ -26,6 +26,7 @@
 |---|---|---|
 | 投标流 | `status: active` 且无指定供应商 | 可投标机会 |
 | 研究流 | `status: intel` 且 `match_level` 为 full/partial/unknown | 单一来源公示、中标/合同公告、已截止公告、采购意向——供中标统计与市场扫描 |
+| 人工线索 | `status: manual` 且 `requires_manual: true` | 页面可访问、品类明确但第三方脱敏，进入飞书待人工补充；仍走创建Webhook |
 
 ## 目录结构
 
@@ -41,7 +42,7 @@
 | `config/doubao.example.json` | 检索配置模板；复制为 `config/doubao.json`（已 gitignore）填 API Key |
 | `data/seen.json` | 去重表，存全量字段（更新流的原值回填依赖它） |
 | `data/query_stats.json` | 每日每条 query 的 raw / unique / pushed 归因统计，裁撤零贡献 query 的依据 |
-| `evals/` | 6 条 eval、65 条断言、4 个 fixture |
+| `evals/` | 7 条 eval、75 条断言、5 个 fixture |
 
 ## 安装
 

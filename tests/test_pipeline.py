@@ -162,6 +162,59 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(any("active" in error and "unknown" in error for error in errors))
         self.assertTrue(any("deadline" in error for error in errors))
 
+    def test_masked_third_party_can_create_manual_status(self):
+        record = {field: "null" for field in tender_pipeline.CREATE_FIELDS}
+        record.update({
+            "title": "某医院过敏原试剂采购线索",
+            "record_id": "T20260819-MAN234",
+            "region": "未知或非传统大区",
+            "purchaser": tender_pipeline.MASKED_PURCHASER,
+            "category": "试剂",
+            "budget": 0,
+            "days_left": 0,
+            "award_amount": 0,
+            "requires_manual": True,
+            "source_url": "https://example.test/masked",
+            "match_level": "partial",
+            "matched_category": "过敏原sIgE试剂",
+            "status": "manual",
+            "notes": "第三方页面脱敏采购人和截止时间，建议人工核实，以采购方公告为准",
+        })
+        evidence = {
+            "source_verified": True,
+            "checked_at": "2026-08-19T10:00:00+08:00",
+            "field_evidence": {
+                "title": "已访问第三方页面，标题一致",
+                "purchaser": "页面显示采购人已脱敏",
+                "source_url": "第三方页面HTTP 200",
+                "matched_category": "页面明确写过敏原特异性IgE试剂",
+            },
+        }
+        self.assertEqual(tender_pipeline.validate_create(record, evidence, "record"), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline_dir = Path(tmp) / "pipeline"
+            result_path = pipeline_dir / "results" / "batch-0001.json"
+            write_json(result_path, {
+                "results": [{
+                    "candidate_id": "CMASKED000001",
+                    "decision": "create",
+                    "record": record,
+                    "evidence": evidence,
+                }]
+            })
+            manifest = {
+                "batches": [{"status": "completed", "result_path": str(result_path)}]
+            }
+            tender_pipeline.export_payloads(pipeline_dir, manifest)
+            payload = json.loads(
+                (pipeline_dir / "payloads" / "create" / "CMASKED000001.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["status"], "manual")
+            self.assertEqual(manifest["create_status_counts"]["manual"], 1)
+        record["requires_manual"] = False
+        errors = tender_pipeline.validate_create(record, evidence, "record")
+        self.assertTrue(any("requires_manual=true" in error for error in errors))
+
     def test_confirmed_receipt_updates_seen_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
