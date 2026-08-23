@@ -93,7 +93,7 @@ def load_config():
 # 命令行未给的参数在 argparse 里是 None，据此区分"没给"和"显式给了 0/false"。
 FALLBACK = {
     "count": 20,
-    "time_range": "45d",
+    "time_range": "72h",
     "auth_level": 0,
     "need_url": 1,
     "need_content": 0,
@@ -186,12 +186,21 @@ def select_queries(all_queries, spec):
 # ---------------------------------------------------------------- 参数
 
 def build_time_range(value):
-    """45d → 以今天为终点的滚动窗口；OneWeek 等枚举原样透传；A..B 闭区间原样透传。"""
+    """72h/3d → 以今天为终点的滚动窗口；枚举和日期闭区间原样透传。"""
     if not value:
         return None
     value = value.strip()
     if value in {"OneDay", "OneWeek", "OneMonth", "OneYear"}:
         return value
+    m = re.fullmatch(r"(\d+)h", value)
+    if m:
+        hours = int(m.group(1))
+        if hours < 1:
+            raise Fatal(f"--time-range 小时数必须大于0：{value}")
+        days = (hours + 23) // 24
+        end = date.today()
+        start = end - timedelta(days=days)
+        return f"{start.isoformat()}..{end.isoformat()}"
     m = re.fullmatch(r"(\d+)d", value)
     if m:
         days = int(m.group(1))
@@ -206,7 +215,7 @@ def build_time_range(value):
         return value
     raise Fatal(
         f"--time-range 取值非法：{value}。"
-        "支持 45d（滚动窗口）/ OneDay|OneWeek|OneMonth|OneYear / 2026-08-01..2026-08-10"
+        "支持 72h/3d（滚动窗口）/ OneDay|OneWeek|OneMonth|OneYear / 2026-08-01..2026-08-10"
     )
 
 
@@ -501,7 +510,7 @@ def main():
     p.add_argument("--query", help="单条即席查询，绕过 keywords.md 清单")
     p.add_argument("--queries", default="all", help="清单选择：all（默认）或 1-4,39 这类表达式")
     p.add_argument("--time-range",
-                   help="45d 滚动窗口（默认）/ OneDay|OneWeek|OneMonth|OneYear / 2026-08-01..2026-08-10 闭区间 / none 不限制")
+                   help="72h 滚动窗口（默认）/ 3d / OneDay|OneWeek|OneMonth|OneYear / 2026-08-01..2026-08-10 闭区间 / none 不限制")
     p.add_argument("--count", type=int, help="每条返回数，1~50（默认 20）")
     p.add_argument("--auth-level", type=int, choices=[0, 1],
                    help="官方语义：0 不限制（默认，本管线要的）/ 1 仅非常权威")

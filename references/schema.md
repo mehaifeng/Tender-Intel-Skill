@@ -1,94 +1,44 @@
-# 定稿 JSON 结构（飞书版）
+# Webhook固定平铺JSON
 
-飞书 Webhook 约束：**平铺格式、每次只接受一条记录、字段不允许出现 null**。因此：
-
-- 全部字段平铺，无嵌套对象
-- 每次推送一个对象（一条记录），多条结果逐条推送
-- 无值的字符串字段填 `"null"`，无值的数字字段填 `0`，布尔默认 `false`——绝不出现 JSON null
-
-## 标准记录（示例：新蔡县人民医院项目）
+Webhook每次只接收一条记录，字段名和顺序固定。全部字段都是字符串；有值填值，没有值填字符串`"null"`，不得出现JSON null、数字、布尔值、数组或嵌套对象。
 
 ```json
 {
-  "title": "新蔡县人民医院流水线式全自动酶联免疫工作站项目",
-  "record_id": "T20260811-K7X2P9",
-  "region": "华北二区",
-  "project_code": "新采招标-2026-26",
-  "purchaser": "新蔡县人民医院",
-  "agency": "河南钰政工程管理有限公司",
-  "procurement_method": "公开招标",
-  "notice_type": "招标公告",
-  "category": "仪器",
-  "budget": 10000,
-  "tech_key_points": "★机械臂≥2；★一次性加样针；★须有医疗器械注册证；开放试剂系统",
-  "publish_date": "2026-07-27",
-  "doc_fetch_end": "2026-08-03T18:00",
-  "deadline": "2026-08-19T09:00",
-  "days_left": 13,
-  "contact": "马先生 0396-2797388",
-  "source_url": "https://zfcg.henan.gov.cn/zhumadian/content?channelCode=H780603&infoId=1994759",
-  "attachment": "https://zfcg.henan.gov.cn/cmsweb35rc67w/xincai/rootfiles/2026/07/30/e0fd524bf97e47b6ad5769e3bc005f13.pdf",
-  "match_level": "partial",
-  "matched_category": "全自动酶免工作站/酶免仪",
-  "status": "active",
-  "requires_manual": false,
-  "designated_supplier": "null",
-  "winner": "null",
-  "award_amount": 0,
-  "notes": "文件获取已截止但PDF可直链下载，建议先电话确认参与资格"
+  "标题": "凤阳县人民医院过敏原检测试剂采购公告",
+  "单位": "凤阳县人民医院",
+  "地区": "凤阳县",
+  "所属省/市": "安徽",
+  "所属大区": "华中大区",
+  "发布时间": "2026-08-23",
+  "截止时间": "2026-08-30T09:00",
+  "预算": "985000",
+  "采购方式": "公开招标",
+  "内容（检索的摘要）": "凤阳县人民医院拟采购过敏原检测试剂，预算98.5万元。",
+  "链接": "https://example.gov.cn/tender/123",
+  "医院全名": "凤阳县人民医院",
+  "医院等级": "二级甲等"
 }
 ```
 
-## 字段字典
+## 字段定义
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| title | string | 项目/公告标题 |
-| record_id | string | skill 端生成的记录唯一编码，格式 `T`+yyyyMMdd+`-`+6位随机大写字母数字（剔除 0/O/1/I），如 `T20260811-K7X2P9`；创建时生成、写 seen.json、永不改变，作为飞书记录定位键；必填 |
-| region | string | 大区单选：按采购人所在省份判定，枚举见"大区判定"；无法判定填 `未知或非传统大区` |
-| project_code | string | 项目编号；无则 `"null"` |
-| purchaser | string | 采购人；仅第三方页面明确脱敏且记录为`status: manual`时允许填`"未披露（第三方脱敏）"` |
-| agency | string | 代理机构；无则 `"null"` |
-| procurement_method | string | 采购方式：公开招标/竞争性谈判/竞争性磋商/询价/单一来源/院内比选等 |
-| notice_type | string | 公告类型：招标公告/更正公告/单一来源公示/中标公告/合同公告/采购意向等 |
-| category | string | 大类单选：`仪器` / `试剂` / `其他`（多类命中取主类，次类放 notes） |
-| budget | number | 预算金额（CNY 元）；未披露填 `0` |
-| tech_key_points | string | 关键技术需求要点，★项必录；无则 `"null"` |
-| publish_date | string | 发布日期 YYYY-MM-DD；无则 `"null"` |
-| doc_fetch_end | string/null 填 "null" | 文件获取/报名截止（ISO 8601）；无则 `"null"` |
-| deadline | string | 投标/响应/公示截止（ISO 8601）；无则 `"null"` |
-| days_left | number | 剩余天数；已截止填 `0` |
-| contact | string | 联系人及电话（一般在公告末尾，采购人与代理机构各一段）；正文确实没有才填 `"null"`，并在 notes 注明 |
-| source_url | string | 原文 URL（核实路径，必填，不填 "null"） |
-| attachment | string | 主文件直链，**必须是绝对 URL**——相对路径要用 source_url 的 scheme+host 补全；跨域 OSS/CDN 链接照收；提取方法见 `references/verification.md`；多余附件放 notes；grep 零命中才填 `"null"` 并在 notes 注明 |
-| match_level | string | `full` / `partial` / `unknown`；明确不匹配时使用`exclude`，不得创建记录 |
-| matched_category | string | 细分类单选，枚举见 keywords.md；多类命中取最相关一个，其余放 notes |
-| status | string | 单选：`active`（可投标）/ `intel`（情报）/ `manual`（第三方脱敏、需人工补充）/ `closed`（已结束）/ `canceled`（取消/废标） |
-| requires_manual | bool | `status: manual`必须为`true`；其他记录有待人工复核时也可为`true` |
-| designated_supplier | string | 单一来源拟定供应商；无则 `"null"` |
-| winner | string | 中标供应商；无则 `"null"` |
-| award_amount | number | 中标/成交金额；无则 `0` |
-| notes | string | 备注：排除原因、次类匹配、附件补充链接、待确认事项等；无则 `"null"` |
+| 字段 | 填写规则 |
+|---|---|
+| 标题 | 使用检索候选标题，由管线绑定；必填 |
+| 单位 | 公告中的采购人、招标人或采购单位；代理机构不填这里 |
+| 地区 | 优先填区/县；网页未披露时可使用医院库唯一匹配的区县 |
+| 所属省/市 | 只填省级行政区或直辖市简称，例如`北京`、`河北`、`上海`、`湖南`、`新疆`、`广西`、`青海`；不得填地级市、`省/市`组合或带行政区后缀的全称 |
+| 所属大区 | 按省份自动映射；省份未知时填`"null"` |
+| 发布时间 | `YYYY-MM-DD`；优先使用检索元数据，原文明确不一致时可用原文并留证据 |
+| 截止时间 | 投标或响应文件提交截止，不是报名/文件获取截止；格式`YYYY-MM-DD`或`YYYY-MM-DDTHH:MM` |
+| 预算 | 人民币元的数字字符串，不带逗号、币种和单位；例如98.5万元写`"985000"` |
+| 采购方式 | 原文中的公开招标、竞争性磋商、询价、院内比选等；不猜测 |
+| 内容（检索的摘要） | Doubao返回的Summary/Snippet，最多2000字，由管线绑定；不得改写成原文摘要 |
+| 链接 | 检索候选URL，由管线绑定；必填 |
+| 医院全名 | 本地医院索引匹配后的标准名称；索引未匹配但原文明示全名时可保留并给证据 |
+| 医院等级 | 只能来自本地医院索引的唯一匹配；无等级、同名歧义或等级冲突时填`"null"` |
 
-## seen.json 专属字段（**绝不进飞书载荷**）
-
-上面的字段字典 = 创建流飞书载荷的**完整**字段集。`data/seen.json` 在此基础上额外存 5 个元字段，供去重、更新流原值回填与 query 归因使用：
-
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| dedup_key | string | 去重键：有项目编号用 `<project_code>\|<purchaser>`，无则用 `source_url` |
-| first_seen | string | 首次命中日期 YYYY-MM-DD |
-| last_seen | string | 最近一次命中日期 YYYY-MM-DD |
-| pushed | bool | 是否已推送成功（HTTP 200 且 `code: 0`） |
-| found_by_query | number[] | 命中该条的**全部** keywords.md §5 query 编号，如 `[3, 27]`；阶段 1 跨查询去重时采集，用途见 keywords.md §12 |
-
-**推送前必须剥掉这 5 个字段。** 飞书字段集固定、平铺、不接受嵌套——`found_by_query` 是数组，混进载荷会直接触发字段识别报错。`scripts/send_webhook.ps1 -DryRun` 的平铺校验能拦住它，改动载荷组装逻辑后先用 DryRun 过一遍。
-
-## 大区判定（region 单选）
-
-`region` 按**采购人（purchaser）所在省份**判定。飞书字段为单选，只能填以下选项之一：
-
-北京直管区、华中大区、东北一区、东南大区、华北二区、西北大区、华北一区、东北二区、西南大区、华东大区、华南大区、未知或非传统大区
+## 大区映射
 
 | 大区 | 省市 |
 |---|---|
@@ -104,68 +54,33 @@
 | 东南大区 | 福建、江西 |
 | 西南大区 | 四川、重庆、云南、贵州 |
 
-判定规则：采购人所在省份在表内 → 填对应大区；省份不在表内或无法确定 → 填 `未知或非传统大区`。
+## 医院索引
 
-## 状态枚举（与飞书单选字段一致，2026-08-11 对齐）
+- 运行索引：`data/hospitals.min.json.gz`，50,599条，保留名称、别名、省、市、区县、等级。
+- 原始工作区另有六字段可查看副本；运行包只保留压缩索引，避免体积膨胀。
+- 匹配器：`scripts/hospital_match.py`。
+- 只接受名称或别名的确定性匹配；同名单位必须由省、市或区县消歧。
+- 数据库中的`未知`、`民营医院`等非等级值已清空；Webhook输出为`"null"`。
 
-- `active`：公告有效、截止未过、清单匹配、可投标——投标流
-- `intel`：单一来源公示 / 中标公告 / 合同公告 / 采购意向（含招标意向等探索性公告）/ **已截止的招标与采购公告**——不可投标但具情报价值，填 designated_supplier / winner / award_amount——研究流
-- `manual`：目标品类明确（`match_level`必须为`full`或`partial`），但采购人、截止时间等字段被脱敏或源页无法访问；允许两类证据：已访问第三方页面的`verification_level=source`，或标题有招采意图且Doubao Summary/Content命中目标品类的`verification_level=search_content`。`requires_manual=true`，进入飞书待人工补充，不计入可投标机会
-- `closed`：已推送的 active 记录截止后经更新流转 closed、或项目处理完毕——吸收原 `expired`；**新检索发现的已截止公告不建 closed，直接走 intel 研究流**
-- `canceled`：采购取消 / 废标 / 公告撤销
+## 运行时证据
 
-已移除：`expired`（并入 `closed`）。注意飞书字段`status: manual`是可推送记录；批次`decision: manual`是不推送的本地人工队列，两者不同。
+`evidence`只保存在批次结果中，不进入Webhook。必须含：
 
-## 更新流 JSON 结构（飞书更新 Webhook，2026-08-11 定稿）
+- `source_verified`：是否实际访问了候选链接；
+- `checked_at`：含时区的ISO 8601时间；
+- `field_evidence`：网页核实字段的文本证据；
+- `hospital_match`：管线自动写入的医院匹配方法、匹配键和冲突信息。
 
-更新已有记录时走独立 Webhook（与创建流分开），定位用 `record_id`（skill 端生成，见字段字典）。**飞书 Webhook 只接受固定 JSON——字段集固定，每次发送完全相同，永不增删。**
+单位、地区、所属省/市、截止时间、预算、采购方式和模型提供的医院全名如果没有字段证据，管线会保守改为`"null"`；医院索引自动补出的字段不需要模型重复举证。管线会把`安徽省`、`广西壮族自治区`、`北京市`等输入统一归一化为`安徽`、`广西`、`北京`，并拒绝无法识别的市级值或组合值进入推送载荷。
 
-约束与创建流相同：**平铺、无嵌套、无 null**（无值字符串 `"null"`、无值数字 `0`）。
+## seen.json内部字段
 
-**固定字段集（14 个）**：`record_id`、`change_type`、`status`、`notice_type`、`publish_date`、`deadline`、`winner`、`award_amount`、`designated_supplier`、`budget`、`contact`、`attachment`、`source_url`、`notes`
+成功推送后，`seen.json`在13个业务字段之外保存以下下划线字段；它们绝不进入Webhook：
 
-**核心规则——原值回填**：每次发送全部字段；**变更字段填新值，未变更字段填 seen.json 中存的原值**（无值按创建流规则填 `"null"`/`0`）。飞书无条件写入也安全：写回原值 = 无变化，不会破坏已有数据。代价：seen.json 必须存全量字段（实现时扩展）。
+- `_candidate_id`
+- `_first_seen`
+- `_last_seen`
+- `_pushed`
+- `_found_by_query`
 
-```json
-{
-  "record_id": "T20260811-K7X2P9",
-  "change_type": "status_change",
-  "status": "closed",
-  "notice_type": "中标公告",
-  "publish_date": "2026-08-10",
-  "deadline": "2026-08-19T09:00",
-  "winner": "XX医疗器械有限公司",
-  "award_amount": 850000,
-  "designated_supplier": "null",
-  "budget": 10000,
-  "contact": "马先生 0396-2797388",
-  "attachment": "null",
-  "source_url": "https://zfcg.henan.gov.cn/zhumadian/content?channelCode=H780603&infoId=1994759",
-  "notes": "更新：中标公告发布，项目结束，中标方XX，金额85万"
-}
-```
-
-**change_type 枚举与触发场景**：
-
-| change_type | 触发场景 | 本次变更的字段 |
-|---|---|---|
-| `status_change` | 检索命中已推送记录的新公告：中标→closed、废标→canceled | status、notice_type、publish_date；中标再变更 winner / award_amount |
-| `deadline_change` | 更正公告且截止时间变更 | deadline、notice_type、publish_date |
-| `correction` | 其他信息更正（联系人、预算、附件等） | budget / contact / attachment 等 |
-
-**固定规则**：
-- `record_id` 必填，定位唯一，永不改变
-- `title`、`purchaser`、`region`、`category` 等认为不可变，不进更新流（真有更名再扩展字段集）
-- 更新成功（HTTP 200 且 `code: 0`）后同步更新 seen.json 对应记录（含全量字段）；失败不更新，下次运行重试
-
-## 零命中约定
-
-无任何有效条目时**不推送**（避免飞书堆积无意义记录），仅在执行摘要中说明"今日无新增有效条目"。
-
-## 运行时证据（不进飞书载荷）
-
-模型提交创建或更新判断时，必须同时提供带时区的`checked_at`和非空`field_evidence`；格式见 `references/verification.md`。正常证据使用`source_verified=true`与`verification_level=source`（旧结果未填level时按source兼容）。仅新建`status: manual`可使用`source_verified=false`、`verification_level=search_content`和候选`content_path`。该兜底必须同时通过标题招采意图与Doubao Summary/Content目标品类复核，脚本会归档`content_sha256`与`category_signals`。`active`、`intel`和更新流必须使用source证据。
-
-这些证据只保存在批次结果中，由 `scripts/tender_pipeline.py` 校验后剥离，不进入飞书载荷。只有标题、只有笼统Content或品类无法确认时使用`decision: manual`，不得生成载荷。
-
-新建 `active` 记录还必须满足：`match_level` 为 `full` 或 `partial`、`deadline` 已核实且非 `"null"`、`designated_supplier` 为 `"null"`。这些约束由脚本执行，不能靠人工绕过。
+去重以规范化后的`链接`为准。旧版记录中的`source_url`仍可用于兼容去重。

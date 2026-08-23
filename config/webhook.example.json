@@ -1,0 +1,4 @@
+{
+  "_说明": "复制为config/webhook.json并填入飞书Webhook地址。该文件已在.gitignore中，不会被提交；环境变量FEISHU_WEBHOOK_URL优先。",
+  "webhook_url": "填入飞书Webhook地址"
+}

@@ -1,5 +1,9 @@
 # 豆包搜索直连配置含 API Key，禁止提交；参照 config/doubao.example.json 在本地创建
 config/doubao.json
+config/webhook.json
+
+# 可分发包内含本地凭据，只保留在本机，不提交版本库
+dist/
 
 # 本机权限允许清单，因机器而异
 .claude/settings.local.json
