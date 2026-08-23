@@ -38,6 +38,8 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from search_common import canonical_url
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -338,7 +340,7 @@ def dedup_candidates(runs):
     order = []
     for run in runs:
         for item in run["results"]:
-            url = (item.get("Url") or "").strip()
+            url = canonical_url(item.get("Url") or "")
             if not url:
                 continue
             if url not in by_url:
@@ -365,7 +367,7 @@ def dedup_candidates(runs):
 
 def candidate_id(url):
     """稳定候选编号；同一 URL 跨运行保持一致，便于按需读取正文。"""
-    return "C" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:12].upper()
+    return "C" + hashlib.sha256(canonical_url(url).encode("utf-8")).hexdigest()[:12].upper()
 
 
 def title_fingerprint(title):
@@ -387,6 +389,15 @@ def write_candidate_artifacts(candidates, out_dir, run_date):
             "source_url": item["url"],
             "summary": item["summary"],
             "content": item["content"],
+            "source_fields": {},
+            "field_evidence": {},
+            "attachments": [],
+            "sources": ["doubao"],
+            "alternate_sources": [],
+            "found_by_source_query": [
+                {"source": "doubao", "query_number": number}
+                for number in item["found_by_query"]
+            ],
         }
         (out_dir / content_rel).write_text(
             json.dumps(full, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -403,6 +414,15 @@ def write_candidate_artifacts(candidates, out_dir, run_date):
             "auth_info_des": item["auth_info_des"],
             "rank_score": item["rank_score"],
             "found_by_query": item["found_by_query"],
+            "found_by_source_query": full["found_by_source_query"],
+            "source": "doubao",
+            "sources": ["doubao"],
+            "source_fields": {},
+            "field_evidence": {},
+            "attachments": [],
+            "date_authoritative": False,
+            "retrieval_verified": False,
+            "alternate_sources": [],
             "teaser": truncate(teaser_source, 240),
             "content_path": content_rel,
         })

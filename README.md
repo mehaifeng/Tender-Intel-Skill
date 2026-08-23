@@ -5,10 +5,10 @@
 ## 处理流程
 
 ```text
-Doubao固定Query检索
+Doubao全网检索 + CCGP官方HTTP检索
+  → 统一候选契约与跨来源查重
   → 标题与内容信号预筛
-  → 链接去重
-  → 每批10条快速核验（不追附件）
+  → 每批10条快速核验（CCGP缺字段时可按需读取直链附件）
   → 全国医院库确定性匹配
   → 固定13字段校验
   → DryRun
@@ -23,7 +23,11 @@ Doubao固定Query检索
 | `references/schema.md` | 固定13字段、医院匹配和大区规则 |
 | `references/verification.md` | 快速核验协议 |
 | `references/keywords.md` | 固定49条检索Query和品类词 |
+| `references/ccgp.md` | CCGP单词Query、普通HTTP约束和来源优先级 |
+| `scripts/tender_search.py` | 可插拔多来源统一检索入口 |
 | `scripts/doubao_search.py` | Doubao官方API检索 |
+| `scripts/ccgp_search.py` | 中国政府采购网普通HTTP检索与详情字段提取 |
+| `scripts/search_common.py` | 统一候选契约、链接规范化与跨来源查重 |
 | `scripts/tender_pipeline.py` | 去重、预筛、批次、字段校验和回执登记 |
 | `scripts/hospital_match.py` | 医院名称、别名、等级的本地确定性匹配 |
 | `scripts/send_webhook.py` | 主用Webhook DryRun和生产发送门禁 |
@@ -41,8 +45,10 @@ Doubao固定Query检索
 检索：
 
 ```bash
-python scripts/doubao_search.py
+python scripts/tender_search.py
 ```
+
+默认同时运行`doubao,ccgp`。可用`--sources doubao`或`--sources ccgp`单独诊断某个适配器。CCGP不需要账号或浏览器；搜索页、完整详情正文和附件直链均由普通HTTP读取。
 
 建立队列：
 
