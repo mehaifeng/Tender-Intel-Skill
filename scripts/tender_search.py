@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import date, datetime
@@ -48,11 +49,30 @@ def _ccgp_command(args, source_dir):
     return command
 
 
+def _plap_command(args, source_dir):
+    command = [
+        sys.executable, str(SCRIPTS / "plap_search.py"),
+        "--time-range", args.time_range,
+        "--out-dir", str(source_dir),
+        "--strategy", args.plap_strategy,
+        "--delay", str(args.plap_delay),
+        "--page-size", str(args.plap_page_size),
+        "--max-pages-per-task", str(args.plap_max_pages),
+    ]
+    if args.plap_queries:
+        command.extend(["--queries", args.plap_queries])
+    if args.dry_run:
+        command.append("--dry-run")
+    return command
+
+
 # 新来源只需实现同一候选目录契约并在这里注册命令构造器。
 ADAPTERS = {
     "doubao": _doubao_command,
     "ccgp": _ccgp_command,
+    "plap": _plap_command,
 }
+DEFAULT_SOURCES = ",".join(ADAPTERS)
 
 
 def parse_sources(value):
@@ -77,14 +97,27 @@ def load_summary(source_dir):
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description="Tender Intel 可插拔多来源检索层")
-    parser.add_argument("--sources", default="doubao,ccgp", help="逗号分隔；默认 doubao,ccgp")
+    parser.add_argument(
+        "--sources",
+        default=DEFAULT_SOURCES,
+        help=f"逗号分隔；默认启用全部已注册适配器：{DEFAULT_SOURCES}",
+    )
     parser.add_argument("--time-range", default="72h", help="72h / 3d / YYYY-MM-DD..YYYY-MM-DD")
     parser.add_argument("--out-dir", help="统一候选目录；默认 .tmp/search/<日期>")
     parser.add_argument("--doubao-queries", help="传给豆包适配器的编号表达式")
     parser.add_argument("--ccgp-queries", help="传给 CCGP 的逗号分隔单词 Query")
     parser.add_argument("--ccgp-delay", type=float, default=2.0)
     parser.add_argument("--ccgp-max-pages", type=int, default=100)
+    parser.add_argument("--plap-queries", help="传给 PLAP 的逗号分隔标题 Query")
+    parser.add_argument("--plap-strategy", choices=("hybrid", "title", "enumerate"), default="hybrid")
+    parser.add_argument("--plap-delay", type=float, default=1.0)
+    parser.add_argument("--plap-page-size", type=int, default=20)
+    parser.add_argument("--plap-max-pages", type=int, default=100)
     parser.add_argument("--no-stats", action="store_true", help="不更新豆包 query_stats")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -98,6 +131,8 @@ def main():
     out_dir = Path(args.out_dir) if args.out_dir else ROOT / ".tmp" / "search" / date.today().isoformat()
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
     source_root = out_dir / ".sources"
+    adapter_env = os.environ.copy()
+    adapter_env["PYTHONIOENCODING"] = "utf-8"
     runs = []
     usable_dirs = []
     for source in sources:
@@ -105,7 +140,15 @@ def main():
         source_dir.mkdir(parents=True, exist_ok=True)
         command = ADAPTERS[source](args, source_dir)
         print(f"运行检索来源：{source}", flush=True)
-        completed = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=adapter_env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+        )
         if completed.stdout.strip():
             print(completed.stdout.rstrip())
         if completed.stderr.strip():

@@ -492,6 +492,7 @@ def collect(client, queries, start, end, max_pages_per_query=100):
             "sources": ["ccgp"],
             "date_authoritative": True,
             "retrieval_verified": verified,
+            "content_access": "public_full" if verified else "metadata_only",
         })
     return candidates, failures, raw_count
 

@@ -13,11 +13,34 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 TRACKING_KEYS = {"spm", "from", "source", "track", "timestamp", "t"}
 CCGP_ARTICLE_RE = re.compile(r"/t\d{8}_(\d+)\.htm$", re.I)
+PLAP_NOTICE_RE = re.compile(r"/ggxx/info/\d{4}/([0-9a-f]{32})\.html$", re.I)
+PLAP_HOSTS = {"plap.mil.cn", "www.plap.mil.cn"}
+SOURCE_PRIORITIES = {
+    "ccgp": 400,
+    "plap": 400,
+}
 PROJECT_ID_RE = re.compile(
     r"(?:项目编号|采购项目编号|招标编号|项目编码)\s*[：:]\s*"
     r"([A-Za-z0-9][A-Za-z0-9._()（）/\-]{2,80})",
     re.I,
 )
+TARGET_CATEGORY_PATTERNS = [
+    ("过敏原/IgE", re.compile(r"过敏原|过敏源|变应原|特异性\s*IgE|sIgE|总\s*IgE|tIgE", re.I)),
+    ("自身抗体/自身免疫", re.compile(
+        r"自身抗体|自身免疫|抗核抗体|\bANA\b|\bENA\b|双链\s*DNA|dsDNA|\bANCA\b|"
+        r"抗磷脂抗体|心磷脂抗体|自免肝|肌炎抗体|\bPLA2R\b|细胞因子|IgG\s*亚类",
+        re.I,
+    )),
+    ("酶联免疫", re.compile(r"酶联免疫|\bELISA\b", re.I)),
+    ("化学发光免疫", re.compile(
+        r"化学发光.{0,8}(?:免疫|分析仪|分析系统|试剂|检测)|"
+        r"(?:免疫|分析仪|分析系统|试剂|检测).{0,8}化学发光|发光免疫",
+        re.I,
+    )),
+    ("免疫荧光/免疫印迹", re.compile(r"免疫荧光|免疫印迹|免疫印迹仪", re.I)),
+    ("免疫质控/校准", re.compile(r"免疫.{0,8}(?:质控品|校准品)|(?:质控品|校准品).{0,8}免疫", re.I)),
+    ("免疫分析仪器", re.compile(r"免疫分析仪|全自动酶免|酶免工作站|酶免仪|酶标仪|洗板机", re.I)),
+]
 
 
 def compact_text(value, limit=None):
@@ -32,16 +55,20 @@ def title_fingerprint(title):
 
 
 def canonical_url(raw):
-    """去跟踪参数，并把 CCGP 公告统一到 HTTPS。"""
+    """去跟踪参数，并规范 CCGP、PLAP 官方公告链接。"""
     try:
         parts = urlsplit(str(raw or "").strip())
         host = parts.netloc.lower()
         scheme = parts.scheme.lower()
-        if host in {"ccgp.gov.cn", "www.ccgp.gov.cn", "search.ccgp.gov.cn"}:
+        if host in {"ccgp.gov.cn", "www.ccgp.gov.cn", "search.ccgp.gov.cn"} | PLAP_HOSTS:
             scheme = "https"
         query = []
         for key, value in parse_qsl(parts.query, keep_blank_values=True):
-            if key.lower().startswith("utm_") or key.lower() in TRACKING_KEYS:
+            if (
+                key.lower().startswith("utm_")
+                or key.lower() in TRACKING_KEYS
+                or (host in PLAP_HOSTS and key.lower() in {"noticetype", "channel"})
+            ):
                 continue
             query.append((key, value))
         path = parts.path.rstrip("/") or "/"
@@ -57,6 +84,15 @@ def candidate_id(url):
 def ccgp_article_id(url):
     match = CCGP_ARTICLE_RE.search(urlsplit(canonical_url(url)).path)
     return match.group(1) if match else ""
+
+
+def plap_notice_id(url):
+    match = PLAP_NOTICE_RE.search(urlsplit(canonical_url(url)).path)
+    return match.group(1).lower() if match else ""
+
+
+def target_category_signals(text):
+    return [name for name, pattern in TARGET_CATEGORY_PATTERNS if pattern.search(text or "")]
 
 
 def notice_family(value):
@@ -97,6 +133,9 @@ def identity_keys(candidate, content=None):
     article_id = ccgp_article_id(url)
     if article_id:
         keys.add(("ccgp", article_id))
+    notice_id = plap_notice_id(url)
+    if notice_id:
+        keys.add(("plap", notice_id))
     fingerprint = candidate.get("title_fingerprint") or title_fingerprint(candidate.get("title"))
     if len(fingerprint) >= 8:
         keys.add(("title", fingerprint))
@@ -158,6 +197,12 @@ def write_candidates(candidates, out_dir, run_date):
             "attachments": full["attachments"],
             "date_authoritative": bool(item.get("date_authoritative")),
             "retrieval_verified": bool(item.get("retrieval_verified")),
+            "content_access": item.get("content_access") or "unknown",
+            "source_priority": int(
+                item.get("source_priority")
+                if item.get("source_priority") is not None
+                else SOURCE_PRIORITIES.get(item.get("source"), 0)
+            ),
             "alternate_sources": full["alternate_sources"],
             "teaser": compact_text(teaser_source, 240),
             "content_path": content_rel,
@@ -209,14 +254,18 @@ class _UnionFind:
 
 
 def _preference(candidate, content):
-    url = canonical_url(candidate.get("url"))
-    official = 1 if urlsplit(url).netloc in {"ccgp.gov.cn", "www.ccgp.gov.cn"} else 0
+    priority = int(
+        candidate.get("source_priority")
+        if candidate.get("source_priority") is not None
+        else SOURCE_PRIORITIES.get(candidate.get("source"), 0)
+    )
     verified = 1 if candidate.get("retrieval_verified") else 0
-    return official, verified, len(content.get("content") or "")
+    access_rank = {"public_full": 2, "public_partial": 1}.get(candidate.get("content_access"), 0)
+    return priority, verified, access_rank, len(content.get("content") or "")
 
 
 def merge_source_dirs(source_dirs):
-    """合并任意适配器目录；优先保留 CCGP 官方正文并保全来源归因。"""
+    """合并任意适配器目录；按来源权威级别和正文可用性选主来源。"""
     rows = []
     for source_dir in source_dirs:
         rows.extend(load_source_candidates(source_dir))
@@ -276,6 +325,12 @@ def merge_source_dirs(source_dirs):
             "sources": source_names,
             "date_authoritative": any(c.get("date_authoritative") for c, _ in members),
             "retrieval_verified": bool(primary_candidate.get("retrieval_verified")),
+            "content_access": primary_candidate.get("content_access") or "unknown",
+            "source_priority": int(
+                primary_candidate.get("source_priority")
+                if primary_candidate.get("source_priority") is not None
+                else SOURCE_PRIORITIES.get(primary_candidate.get("source"), 0)
+            ),
             "alternate_sources": alternates,
         })
     return merged

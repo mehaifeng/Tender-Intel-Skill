@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from search_common import canonical_url, merge_source_dirs, write_candidates  # noqa: E402
+from search_common import canonical_url, merge_source_dirs, plap_notice_id, write_candidates  # noqa: E402
 from tender_pipeline import canonicalize_create, historical_identity_keys  # noqa: E402
 
 
@@ -17,6 +17,16 @@ class SearchMergeTests(unittest.TestCase):
             canonical_url("http://www.ccgp.gov.cn/a.htm?utm_source=x"),
             "https://www.ccgp.gov.cn/a.htm",
         )
+
+    def test_plap_url_drops_routing_parameters_and_keeps_notice_id(self):
+        raw = (
+            "https://www.plap.mil.cn/freecms/site/juncai/ggxx/info/2026/"
+            "8a1d04009fd98fe401a03138aab456cf.html?noticeType=001024&channel=abc"
+        )
+        normalized = canonical_url(raw)
+        self.assertNotIn("noticeType", normalized)
+        self.assertNotIn("channel", normalized)
+        self.assertEqual(plap_notice_id(normalized), "8a1d04009fd98fe401a03138aab456cf")
 
     def test_cross_source_duplicate_prefers_ccgp_and_keeps_doubao_attribution(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -73,6 +83,28 @@ class SearchMergeTests(unittest.TestCase):
                 "content": "项目编号：ABC-1", "source_fields": {"项目编号": "ABC-1", "公告类型": "中标公告"},
             }], second, "2026-08-23")
             self.assertEqual(len(merge_source_dirs([first, second])), 2)
+
+    def test_plap_official_candidate_wins_over_doubao_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            doubao = root / "doubao"
+            plap = root / "plap"
+            title = "某医院自身抗体试剂采购公告"
+            write_candidates([{
+                "title": title, "url": "https://mirror.example/1", "source": "doubao",
+                "summary": "转载摘要", "content": "转载正文", "retrieval_verified": False,
+            }], doubao, "2026-08-25")
+            write_candidates([{
+                "title": title,
+                "url": "https://www.plap.mil.cn/freecms/site/juncai/ggxx/info/2026/8a1d04009fd98fe401a03138aab456cf.html",
+                "source": "plap", "sources": ["plap"], "source_priority": 400,
+                "summary": "官方摘要", "content": "官方公开正文",
+                "retrieval_verified": True, "content_access": "public_partial",
+            }], plap, "2026-08-25")
+            merged = merge_source_dirs([doubao, plap])
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["source"], "plap")
+            self.assertEqual(merged[0]["content_access"], "public_partial")
 
     def test_seen_identity_requires_same_date_for_title_only_match(self):
         first = historical_identity_keys("某医院试剂采购公告", "https://a.test/1", "2026-08-21")

@@ -87,4 +87,6 @@ Webhook每次只接收一条记录，字段名和顺序固定。全部字段都�
 - `_pushed`
 - `_found_by_query`
 
-运行内跨来源去重依次使用规范化`链接`、CCGP公告数字ID、完整标题指纹、项目编号加公告阶段；同一公告优先保留CCGP。跨运行与`seen.json`比较时，除链接和CCGP公告ID外，还使用“完整标题指纹+发布时间”，避免Doubao转载链接与CCGP官方链接重复推送。旧版记录中的`source_url`仍兼容。
+候选索引还保存`content_access`（`public_full`、`public_partial`、`metadata_only`或`unknown`）和数值型`source_priority`，两者不进入Webhook。
+
+运行内跨来源去重依次使用规范化`链接`、CCGP公告数字ID、PLAP公告ID、完整标题指纹、项目编号加公告阶段；官方来源优先于转载或聚合来源。跨运行与`seen.json`比较时，除链接、CCGP公告ID和PLAP公告ID外，还使用“完整标题指纹+发布时间”，避免不同来源重复推送。旧版记录中的`source_url`仍兼容。

@@ -427,6 +427,7 @@ def write_candidate_artifacts(candidates, out_dir, run_date):
             "attachments": [],
             "date_authoritative": False,
             "retrieval_verified": False,
+            "content_access": "unknown",
             "alternate_sources": [],
             "teaser": truncate(teaser_source, 240),
             "content_path": content_rel,
