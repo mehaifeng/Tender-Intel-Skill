@@ -355,11 +355,19 @@ def dedup_candidates(runs):
                     "summary": item.get("Summary") or item.get("Snippet") or "",
                     "content": item.get("Content") or "",
                     "found_by_query": [],
+                    "found_by_source_query": [],
                 }
                 order.append(url)
             fbq = by_url[url]["found_by_query"]
             if run["num"] not in fbq:
                 fbq.append(run["num"])
+            source_hit = {
+                "source": "doubao",
+                "query_number": run["num"],
+                "query": run["query"],
+            }
+            if source_hit not in by_url[url]["found_by_source_query"]:
+                by_url[url]["found_by_source_query"].append(source_hit)
     for url in order:
         by_url[url]["found_by_query"].sort()
     return [by_url[u] for u in order]
@@ -394,10 +402,7 @@ def write_candidate_artifacts(candidates, out_dir, run_date):
             "attachments": [],
             "sources": ["doubao"],
             "alternate_sources": [],
-            "found_by_source_query": [
-                {"source": "doubao", "query_number": number}
-                for number in item["found_by_query"]
-            ],
+            "found_by_source_query": item["found_by_source_query"],
         }
         (out_dir / content_rel).write_text(
             json.dumps(full, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

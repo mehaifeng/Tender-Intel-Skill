@@ -1,4 +1,4 @@
-# 发送一条固定13字段平铺JSON到飞书Webhook。
+# 发送一条固定15字段平铺JSON到飞书Webhook。
 # DryRun只校验；生产必须显式-Live并由manifest授权。
 param(
     [Parameter(Mandatory=$true)]
@@ -31,7 +31,8 @@ if ($obj -is [System.Object[]]) {
 
 $expectedFields = @(
     "标题", "单位", "地区", "所属省/市", "所属大区", "发布时间", "截止时间",
-    "预算", "采购方式", "内容（检索的摘要）", "链接", "医院全名", "医院等级"
+    "预算", "采购方式", "科室", "命中关键词", "内容（检索的摘要）", "链接",
+    "医院全名", "医院等级"
 )
 $actualFields = @($obj.PSObject.Properties.Name)
 $missingFields = @($expectedFields | Where-Object { $actualFields -notcontains $_ })
@@ -44,6 +45,16 @@ $provinceValues = @(
     "广东", "广西", "海南", "四川", "贵州", "云南", "西藏", "陕西", "甘肃",
     "青海", "宁夏", "新疆", "内蒙古"
 )
+$provinceFullNames = @{
+    "北京"="北京市"; "天津"="天津市"; "上海"="上海市"; "重庆"="重庆市"
+    "河北"="河北省"; "山西"="山西省"; "辽宁"="辽宁省"; "吉林"="吉林省"
+    "黑龙江"="黑龙江省"; "江苏"="江苏省"; "浙江"="浙江省"; "安徽"="安徽省"
+    "福建"="福建省"; "江西"="江西省"; "山东"="山东省"; "河南"="河南省"
+    "湖北"="湖北省"; "湖南"="湖南省"; "广东"="广东省"; "广西"="广西壮族自治区"
+    "海南"="海南省"; "四川"="四川省"; "贵州"="贵州省"; "云南"="云南省"
+    "西藏"="西藏自治区"; "陕西"="陕西省"; "甘肃"="甘肃省"; "青海"="青海省"
+    "宁夏"="宁夏回族自治区"; "新疆"="新疆维吾尔自治区"; "内蒙古"="内蒙古自治区"
+}
 foreach ($property in $obj.PSObject.Properties) {
     if ($null -eq $property.Value -or -not ($property.Value -is [string]) -or $property.Value.Length -eq 0) {
         $invalidFields += $property.Name
@@ -73,6 +84,13 @@ if ($obj.'所属省/市' -ne "null" -and $provinceValues -notcontains $obj.'所�
     Write-Warning "所属省/市必须是省级行政区或直辖市简称，例如北京、河北、上海、新疆"
     $bad = $true
 }
+if ($obj.'地区' -ne "null") {
+    $expectedPrefix = [string]$provinceFullNames[$obj.'所属省/市']
+    if (-not $expectedPrefix -or -not $obj.'地区'.StartsWith($expectedPrefix)) {
+        Write-Warning "地区必须以所属省份、自治区或直辖市全称开头，例如安徽省凤阳县、北京市朝阳区"
+        $bad = $true
+    }
+}
 if ($bad) { exit 2 }
 
 if (-not $WebhookUrl) {
@@ -101,7 +119,7 @@ if ($DryRun) {
     Write-Output ("  字节数 : " + $bytes.Length)
     Write-Output ("  字段数 : " + @($obj.PSObject.Properties).Count)
     Write-Output $json
-    Write-Output "校验通过：固定13字段、单条、平铺、全字符串、无JSON null"
+    Write-Output "校验通过：固定15字段、单条、平铺、全字符串、无JSON null"
     exit 0
 }
 

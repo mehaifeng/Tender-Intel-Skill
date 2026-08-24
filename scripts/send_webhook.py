@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""校验并发送Tender Intel固定13字段Webhook载荷。"""
+"""校验并发送Tender Intel固定15字段Webhook载荷。"""
 
 import argparse
 import hashlib
@@ -16,13 +16,24 @@ from urllib.request import Request, urlopen
 
 FIELDS = [
     "标题", "单位", "地区", "所属省/市", "所属大区", "发布时间", "截止时间",
-    "预算", "采购方式", "内容（检索的摘要）", "链接", "医院全名", "医院等级",
+    "预算", "采购方式", "科室", "命中关键词", "内容（检索的摘要）", "链接",
+    "医院全名", "医院等级",
 ]
 PROVINCE_LEVEL_DIVISIONS = {
     "北京", "天津", "上海", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江",
     "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南",
     "广东", "广西", "海南", "四川", "贵州", "云南", "西藏", "陕西", "甘肃",
     "青海", "宁夏", "新疆", "内蒙古",
+}
+PROVINCE_FULL_NAMES = {
+    "北京": "北京市", "天津": "天津市", "上海": "上海市", "重庆": "重庆市",
+    "河北": "河北省", "山西": "山西省", "辽宁": "辽宁省", "吉林": "吉林省",
+    "黑龙江": "黑龙江省", "江苏": "江苏省", "浙江": "浙江省", "安徽": "安徽省",
+    "福建": "福建省", "江西": "江西省", "山东": "山东省", "河南": "河南省",
+    "湖北": "湖北省", "湖南": "湖南省", "广东": "广东省", "广西": "广西壮族自治区",
+    "海南": "海南省", "四川": "四川省", "贵州": "贵州省", "云南": "云南省",
+    "西藏": "西藏自治区", "陕西": "陕西省", "甘肃": "甘肃省", "青海": "青海省",
+    "宁夏": "宁夏回族自治区", "新疆": "新疆维吾尔自治区", "内蒙古": "内蒙古自治区",
 }
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -99,13 +110,18 @@ def validate_payload(payload):
         if extra:
             errors.append(f"多余字段：{extra}")
         if not missing and not extra:
-            errors.append("字段顺序与固定13字段不一致")
+            errors.append("字段顺序与固定15字段不一致")
     for field, value in payload.items():
         if not isinstance(value, str) or value == "":
             errors.append(f"{field}必须是非空字符串；缺失填null")
     province = payload.get("所属省/市")
     if province != "null" and province not in PROVINCE_LEVEL_DIVISIONS:
         errors.append("所属省/市必须是省级行政区或直辖市简称，例如北京、河北、上海、新疆")
+    location = payload.get("地区")
+    if location != "null":
+        expected_prefix = PROVINCE_FULL_NAMES.get(province)
+        if not expected_prefix or not location.startswith(expected_prefix):
+            errors.append("地区必须以所属省份、自治区或直辖市全称开头，例如安徽省凤阳县、北京市朝阳区")
     return errors
 
 
@@ -139,7 +155,7 @@ def validate_manifest(manifest_path, payload_path, payload_sha256):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="发送固定13字段Tender Intel Webhook载荷")
+    parser = argparse.ArgumentParser(description="发送固定15字段Tender Intel Webhook载荷")
     parser.add_argument("--payload", required=True)
     parser.add_argument("--manifest")
     parser.add_argument("--webhook-url", help="仅DryRun可显式传入；Live使用环境变量或config/webhook.json")

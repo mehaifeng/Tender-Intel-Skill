@@ -39,6 +39,7 @@ DETAIL_HTML = """
 </table>
 <p>项目编号：ABC-2026-01</p>
 <p>采购方式：公开招标</p>
+<p>使用科室：医学检验科</p>
 <p>提交投标文件截止时间：2026年09月10日 11:00（北京时间）</p>
 <p class="fjxx">附件信息：</p>
 <a href="https://files.example.gov/spec.docx">采购文件.docx</a>
@@ -62,13 +63,24 @@ class CCGPParserTests(unittest.TestCase):
             {"notice_type": "公开招标公告"},
         )
         self.assertEqual(detail["source_fields"]["单位"], "某医院")
+        self.assertEqual(detail["source_fields"]["地区"], "新疆维吾尔自治区")
         self.assertEqual(detail["source_fields"]["所属省/市"], "新疆")
+        self.assertEqual(detail["source_fields"]["科室"], "医学检验科")
         self.assertEqual(detail["source_fields"]["发布时间"], "2026-08-21")
         self.assertEqual(detail["source_fields"]["项目编号"], "ABC-2026-01")
         self.assertEqual(detail["source_fields"]["截止时间"], "2026-09-10T11:00")
         self.assertEqual(detail["source_fields"]["预算"], "200000")
         self.assertEqual(detail["attachments"][0]["name"], "采购文件.docx")
         self.assertIn("提交投标文件截止时间", detail["content"])
+
+    def test_detail_page_preserves_locality_after_full_province_name(self):
+        detail = parse_detail_page(
+            DETAIL_HTML.replace("新疆维吾尔自治区", "安徽省滁州市凤阳县"),
+            "https://www.ccgp.gov.cn/cggg/dfgg/gkzb/202608/t20260821_27184986.htm",
+            {"notice_type": "公开招标公告"},
+        )
+        self.assertEqual(detail["source_fields"]["所属省/市"], "安徽")
+        self.assertEqual(detail["source_fields"]["地区"], "安徽省滁州市凤阳县")
 
     def test_rate_limit_stops_new_searches_but_keeps_collected_candidate(self):
         class FakeClient:

@@ -90,15 +90,21 @@ class SearchMergeTests(unittest.TestCase):
             "date_authoritative": True,
             "retrieval_verified": True,
             "source_fields": {
-                "单位": "某医院", "所属省/市": "新疆", "截止时间": "2026-09-10T11:00",
-                "预算": "200000", "采购方式": "公开招标",
+                "单位": "某医院", "地区": "新疆维吾尔自治区", "所属省/市": "新疆",
+                "截止时间": "2026-09-10T11:00", "预算": "200000",
+                "采购方式": "公开招标", "科室": "医学检验科",
             },
             "field_evidence": {
-                "单位": "采购单位：某医院", "所属省/市": "行政区域：新疆维吾尔自治区",
+                "单位": "采购单位：某医院", "地区": "行政区域：新疆维吾尔自治区",
+                "所属省/市": "行政区域：新疆维吾尔自治区",
                 "截止时间": "提交投标文件截止时间：2026年09月10日 11:00",
                 "预算": "预算金额：20万元", "采购方式": "采购方式：公开招标",
+                "科室": "使用科室：医学检验科",
             },
-            "search_evidence": {"summary": "官方检索摘要"},
+            "search_evidence": {
+                "summary": "官方检索摘要", "matched_keywords": ["过敏原"],
+                "departments": ["医学检验科"],
+            },
         }
         row = {
             "record": {"发布时间": "2026-08-20"},
@@ -111,10 +117,13 @@ class SearchMergeTests(unittest.TestCase):
         record, _ = canonicalize_create(row, candidate)
         self.assertEqual(record["发布时间"], "2026-08-21")
         self.assertEqual(record["单位"], "某医院")
+        self.assertEqual(record["地区"], "新疆维吾尔自治区")
         self.assertEqual(record["所属省/市"], "新疆")
         self.assertEqual(record["截止时间"], "2026-09-10T11:00")
         self.assertEqual(record["预算"], "200000")
         self.assertEqual(record["采购方式"], "公开招标")
+        self.assertEqual(record["科室"], "医学检验科")
+        self.assertEqual(record["命中关键词"], "过敏原")
 
 
 if __name__ == "__main__":

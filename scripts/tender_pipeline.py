@@ -3,7 +3,7 @@
 """Tender Intel 的轻量状态机、医院匹配与 Webhook 载荷门禁。
 
 模型只处理 prepare 生成的小批次；脚本负责去重、保守预筛、医院库匹配、
-固定 13 字段归一化、载荷导出和成功回执登记。本脚本不发送网络请求。
+固定 15 字段归一化、载荷导出和成功回执登记。本脚本不发送网络请求。
 """
 
 import argparse
@@ -28,9 +28,12 @@ DECISIONS = {"create", "exclude", "manual"}
 
 WEBHOOK_FIELDS = [
     "标题", "单位", "地区", "所属省/市", "所属大区", "发布时间", "截止时间",
-    "预算", "采购方式", "内容（检索的摘要）", "链接", "医院全名", "医院等级",
+    "预算", "采购方式", "科室", "命中关键词", "内容（检索的摘要）", "链接",
+    "医院全名", "医院等级",
 ]
-HIGH_RISK_FIELDS = {"单位", "地区", "所属省/市", "截止时间", "预算", "采购方式", "医院全名"}
+HIGH_RISK_FIELDS = {
+    "单位", "地区", "所属省/市", "截止时间", "预算", "采购方式", "科室", "医院全名",
+}
 REGIONS = {
     "北京直管区", "华中大区", "东北一区", "东南大区", "华北二区", "西北大区",
     "华北一区", "东北二区", "西南大区", "华东大区", "华南大区",
@@ -55,6 +58,16 @@ PROVINCE_LEVEL_DIVISIONS = {
     "青海", "宁夏", "新疆", "内蒙古",
 }
 DIRECT_MUNICIPALITIES = {"北京", "天津", "上海", "重庆"}
+PROVINCE_FULL_NAMES = {
+    "北京": "北京市", "天津": "天津市", "上海": "上海市", "重庆": "重庆市",
+    "河北": "河北省", "山西": "山西省", "辽宁": "辽宁省", "吉林": "吉林省",
+    "黑龙江": "黑龙江省", "江苏": "江苏省", "浙江": "浙江省", "安徽": "安徽省",
+    "福建": "福建省", "江西": "江西省", "山东": "山东省", "河南": "河南省",
+    "湖北": "湖北省", "湖南": "湖南省", "广东": "广东省", "广西": "广西壮族自治区",
+    "海南": "海南省", "四川": "四川省", "贵州": "贵州省", "云南": "云南省",
+    "西藏": "西藏自治区", "陕西": "陕西省", "甘肃": "甘肃省", "青海": "青海省",
+    "宁夏": "宁夏回族自治区", "新疆": "新疆维吾尔自治区", "内蒙古": "内蒙古自治区",
+}
 DATE_RE = re.compile(r"^20\d{2}-[01]\d-[0-3]\d$")
 DATETIME_RE = re.compile(r"^20\d{2}-[01]\d-[0-3]\d(?:T[0-2]\d:[0-5]\d(?::[0-5]\d)?)?$")
 BUDGET_RE = re.compile(r"^\d+(?:\.\d+)?$")
@@ -226,6 +239,45 @@ def target_category_signals(text):
     return [name for name, pattern in TARGET_CATEGORY_PATTERNS if pattern.search(text or "")]
 
 
+QUERY_STOPWORDS = {
+    "招标公告", "采购公告", "询价公告", "磋商公告", "谈判公告", "采购意向",
+    "招标", "采购", "检测", "试剂", "检测试剂", "诊断试剂",
+}
+
+
+def matched_query_keywords(candidate, retrieved_text):
+    """从实际检索 Query 中保留确实出现在候选内容里的关键词。"""
+    values = []
+    for hit in candidate.get("found_by_source_query") or []:
+        if not isinstance(hit, dict):
+            continue
+        query = compact_text(hit.get("query"))
+        if query == "null":
+            continue
+        for term in re.split(r"[\s,，、|]+", query):
+            term = term.strip()
+            if not term or term in QUERY_STOPWORDS:
+                continue
+            if re.search(re.escape(term), retrieved_text or "", re.I) and term not in values:
+                values.append(term)
+    return values
+
+
+def extract_departments(retrieved_text):
+    """只提取正文中带明确“科室”标签的值，不按采购品类猜测。"""
+    values = []
+    pattern = re.compile(
+        r"(?:使用|需求|申请|申购|采购|项目|负责|归口)?科室\s*[：:]\s*"
+        r"([^\n。；;，,|]{2,40})"
+    )
+    for match in pattern.finditer(retrieved_text or ""):
+        value = compact_text(match.group(1)).strip("：: -")
+        value = re.split(r"\s+(?:采购|预算|项目|联系人|联系电话|地址|截止)", value, maxsplit=1)[0]
+        if value and value != "null" and value not in values:
+            values.append(value)
+    return values
+
+
 def validate_candidate_index(candidates, search_dir):
     errors = []
     ids = set()
@@ -303,6 +355,11 @@ def cluster_candidates(candidates):
         representative["found_by_query"] = sorted({
             query for member in members for query in member.get("found_by_query", [])
         })
+        representative["found_by_source_query"] = []
+        for member in members:
+            for query in member.get("found_by_source_query", []):
+                if query not in representative["found_by_source_query"]:
+                    representative["found_by_source_query"].append(query)
         result.append(representative)
     return result
 
@@ -320,6 +377,38 @@ def canonical_province(value, city=""):
         if province in raw:
             return province
     return "null"
+
+
+def normalize_region_location(value, province_value):
+    """输出“省级行政区全称 + 本地地名”；省份未知时不保留孤立地名。"""
+    province = canonical_province(province_value)
+    full_name = PROVINCE_FULL_NAMES.get(province)
+    if not full_name:
+        return "null"
+    location = "" if value in (None, "", "null") else compact_text(value)
+    if location == "null" or not location:
+        return full_name
+    prefixes = {
+        full_name, province, f"{province}省", f"{province}市", f"{province}自治区",
+        f"{province}壮族自治区", f"{province}回族自治区", f"{province}维吾尔自治区",
+    }
+    remainder = location
+    for prefix in sorted(prefixes, key=len, reverse=True):
+        if remainder.startswith(prefix):
+            remainder = remainder[len(prefix):].strip()
+            break
+    return full_name + remainder
+
+
+def region_is_province_only(value):
+    province = canonical_province(value)
+    if province == "null":
+        return False
+    return compact_text(value) in {
+        province, PROVINCE_FULL_NAMES[province], f"{province}省", f"{province}市",
+        f"{province}自治区", f"{province}壮族自治区", f"{province}回族自治区",
+        f"{province}维吾尔自治区",
+    }
 
 
 def region_for(province_value):
@@ -390,6 +479,11 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             continue
 
         enriched = item.copy()
+        retrieved_text = "\n".join((
+            item.get("title", ""),
+            summary if summary != "null" else "",
+            content.get("content", ""),
+        ))
         enriched["search_evidence"] = {
             "title_has_procurement_intent": True,
             "target_category_signals": signals,
@@ -401,6 +495,8 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             "source_fields": item.get("source_fields") or content.get("source_fields") or {},
             "field_evidence": item.get("field_evidence") or content.get("field_evidence") or {},
             "attachments": item.get("attachments") or content.get("attachments") or [],
+            "matched_keywords": matched_query_keywords(item, retrieved_text),
+            "departments": extract_departments(retrieved_text),
         }
         suggestion = hospital_index.match(
             name=item.get("site_name", ""),
@@ -613,21 +709,32 @@ def canonicalize_create(row, candidate):
 
     bound = {
         "标题": compact_text(candidate.get("title")),
+        "命中关键词": "、".join(
+            candidate.get("search_evidence", {}).get("matched_keywords") or []
+        ) or "null",
         "内容（检索的摘要）": candidate.get("search_evidence", {}).get("summary", "null"),
         "链接": compact_text(candidate.get("url")),
     }
+    departments = candidate.get("search_evidence", {}).get("departments") or []
+    if departments:
+        bound["科室"] = "、".join(departments)
     publish_date = candidate_publish_date(candidate)
     if record["发布时间"] == "null" or (candidate.get("date_authoritative") and publish_date != "null"):
         bound["发布时间"] = publish_date
     for field, value in bound.items():
         add_adjustment(row, field, record[field], value, "使用检索阶段绑定值")
         record[field] = value
-        field_evidence.setdefault(field, "检索候选中的管线绑定值")
+        if field == "科室":
+            field_evidence.setdefault(field, "检索正文中的明确科室标签")
+        elif field == "命中关键词":
+            field_evidence.setdefault(field, "实际检索Query与候选内容的交集")
+        else:
+            field_evidence.setdefault(field, "检索候选中的管线绑定值")
 
     source_fields = candidate.get("source_fields") or candidate.get("search_evidence", {}).get("source_fields") or {}
     source_evidence = candidate.get("field_evidence") or candidate.get("search_evidence", {}).get("field_evidence") or {}
     if candidate.get("retrieval_verified"):
-        for field in ("单位", "所属省/市", "截止时间", "预算", "采购方式"):
+        for field in ("单位", "地区", "所属省/市", "截止时间", "预算", "采购方式", "科室"):
             value = to_webhook_text(source_fields.get(field))
             if record[field] == "null" and value != "null":
                 add_adjustment(row, field, record[field], value, "使用权威来源适配器提取值")
@@ -662,8 +769,9 @@ def canonicalize_create(row, candidate):
             record["单位"] = match.get("hospital_name") or "null"
         if record["所属省/市"] == "null" and match.get("province"):
             record["所属省/市"] = canonical_province(match.get("province"), match.get("city"))
-        if record["地区"] == "null" and match.get("district"):
-            record["地区"] = match["district"]
+        matched_locality = match.get("district") or match.get("city")
+        if matched_locality and (record["地区"] == "null" or region_is_province_only(record["地区"])):
+            record["地区"] = matched_locality
         field_evidence["医院全名"] = f"全国医院索引{match.get('match_method')}唯一匹配"
         field_evidence["医院等级"] = "来自全国医院索引；等级冲突时自动置空"
     else:
@@ -674,6 +782,8 @@ def canonicalize_create(row, candidate):
             record["医院全名"] = "null"
 
     normalized_province = canonical_province(record["所属省/市"])
+    if normalized_province == "null":
+        normalized_province = canonical_province(record["地区"])
     add_adjustment(
         row,
         "所属省/市",
@@ -682,6 +792,15 @@ def canonicalize_create(row, candidate):
         "所属省/市只保留省级行政区或直辖市简称",
     )
     record["所属省/市"] = normalized_province
+    normalized_location = normalize_region_location(record["地区"], normalized_province)
+    add_adjustment(
+        row,
+        "地区",
+        record["地区"],
+        normalized_location,
+        "地区必须包含省份、自治区或直辖市全称",
+    )
+    record["地区"] = normalized_location
     derived_region = region_for(record["所属省/市"])
     add_adjustment(row, "所属大区", record["所属大区"], derived_region, "按所属省份确定性映射")
     record["所属大区"] = derived_region
@@ -694,7 +813,7 @@ def validate_create(record, evidence, label):
     if not isinstance(record, dict):
         return errors + [f"{label}.record必须是对象"]
     if list(record.keys()) != WEBHOOK_FIELDS:
-        errors.append(f"{label}.record字段顺序或字段集与固定13字段不一致")
+        errors.append(f"{label}.record字段顺序或字段集与固定15字段不一致")
     for field in WEBHOOK_FIELDS:
         value = record.get(field)
         if not isinstance(value, str) or value == "":
@@ -711,6 +830,12 @@ def validate_create(record, evidence, label):
         errors.append(f"{label}.record.预算必须是人民币元数字字符串或null")
     if record.get("所属省/市") != "null" and record["所属省/市"] not in PROVINCE_LEVEL_DIVISIONS:
         errors.append(f"{label}.record.所属省/市必须是省级行政区或直辖市简称，不能含地级市或行政区后缀")
+    province = record.get("所属省/市")
+    location = record.get("地区")
+    if location != "null":
+        expected_prefix = PROVINCE_FULL_NAMES.get(province)
+        if not expected_prefix or not location.startswith(expected_prefix):
+            errors.append(f"{label}.record.地区必须以所属省份、自治区或直辖市全称开头")
     if record.get("所属大区") != "null" and record["所属大区"] not in REGIONS:
         errors.append(f"{label}.record.所属大区枚举无效")
     return errors

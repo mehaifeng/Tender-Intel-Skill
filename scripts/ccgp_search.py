@@ -322,9 +322,27 @@ def _province_short(value):
         "宁夏回族自治区": "宁夏", "新疆维吾尔自治区": "新疆",
         "北京市": "北京", "天津市": "天津", "上海市": "上海", "重庆市": "重庆",
     }
-    if text in aliases:
-        return aliases[text]
+    for full_name, short_name in aliases.items():
+        if text.startswith(full_name):
+            return short_name
+    province_match = re.match(r"^(.{2,3})省", text)
+    if province_match:
+        return province_match.group(1)
     return re.sub(r"省$", "", text)
+
+
+def _extract_departments(text):
+    values = []
+    pattern = re.compile(
+        r"(?:使用|需求|申请|申购|采购|项目|负责|归口)?科室\s*[：:]\s*"
+        r"([^\n。；;，,|]{2,40})"
+    )
+    for match in pattern.finditer(text or ""):
+        value = compact_text(match.group(1)).strip("：: -")
+        value = re.split(r"\s+(?:采购|预算|项目|联系人|联系电话|地址|截止)", value, maxsplit=1)[0]
+        if value and value not in values:
+            values.append(value)
+    return "、".join(values)
 
 
 def parse_detail_page(html, url, search_item=None):
@@ -350,6 +368,7 @@ def parse_detail_page(html, url, search_item=None):
     put("单位", buyer, f"采购单位：{buyer}" if buyer else "")
     province_raw = _table_value(parser.rows, "行政区域") or search_item.get("province")
     province = _province_short(province_raw)
+    put("地区", province_raw, f"行政区域：{province_raw}" if province_raw else "")
     put("所属省/市", province, f"行政区域：{province_raw}" if province_raw else "")
     published = _table_value(parser.rows, "公告时间") or search_item.get("publish_time")
     published_iso = _iso_datetime(published)
@@ -387,6 +406,8 @@ def parse_detail_page(html, url, search_item=None):
     put("预算", budget, f"预算金额：{budget_text}" if budget_text else "")
     notice_type = search_item.get("notice_type")
     put("公告类型", notice_type, f"检索栏目：{notice_type}" if notice_type else "")
+    departments = _extract_departments(full_text)
+    put("科室", departments, f"正文明确科室：{departments}" if departments else "")
 
     attachments = []
     for anchor in parser.anchors:
