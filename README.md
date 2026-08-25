@@ -26,6 +26,8 @@ Doubao全网检索 + CCGP官方HTTP检索 + PLAP匿名公开检索
 | `references/doubao.md` | 豆包调用约束：单词Query、Sites白名单、时间窗与权威度实测 |
 | `references/ccgp.md` | CCGP单词Query、普通HTTP约束和来源优先级 |
 | `references/plap.md` | 军队采购网匿名公开检索、混合策略和正文降级规则 |
+| `references/hosp.md` | 医院官网适配器：选域规则、三层预筛与成本 |
+| `references/hospital_sites.md` | 医院官网索引 schema、坏站标记与维护流程 |
 | `scripts/tender_search.py` | 可插拔多来源统一检索入口 |
 | `scripts/doubao_search.py` | Doubao官方API检索 |
 | `scripts/ccgp_search.py` | 中国政府采购网普通HTTP检索与详情字段提取 |

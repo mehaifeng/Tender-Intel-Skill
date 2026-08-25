@@ -18,6 +18,9 @@ PLAP_HOSTS = {"plap.mil.cn", "www.plap.mil.cn"}
 SOURCE_PRIORITIES = {
     "ccgp": 400,
     "plap": 400,
+    # 医院自有站是院内遴选/询比类公告的原始发布方，优先于豆包转载与聚合站；
+    # 低于 CCGP/PLAP——后者抓完整详情页，hosp 只有搜索索引给的标题与摘要。
+    "hosp": 380,
 }
 PROJECT_ID_RE = re.compile(
     r"(?:项目编号|采购项目编号|招标编号|项目编码)\s*[：:]\s*"
