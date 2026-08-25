@@ -22,7 +22,8 @@ Doubao全网检索 + CCGP官方HTTP检索 + PLAP匿名公开检索
 | `SKILL.md` | 运行契约与模式选择 |
 | `references/schema.md` | 固定15字段、医院匹配和大区规则 |
 | `references/verification.md` | 快速核验协议 |
-| `references/keywords.md` | 固定49条检索Query和品类词 |
+| `references/keywords.md` | 固定30条单词Query、品类词与边际贡献实测方法 |
+| `references/doubao.md` | 豆包调用约束：单词Query、Sites白名单、时间窗与权威度实测 |
 | `references/ccgp.md` | CCGP单词Query、普通HTTP约束和来源优先级 |
 | `references/plap.md` | 军队采购网匿名公开检索、混合策略和正文降级规则 |
 | `scripts/tender_search.py` | 可插拔多来源统一检索入口 |

@@ -17,3 +17,10 @@ __pycache__/
 # 注意：该文件已被跟踪，.gitignore 对它无效，实际靠 git update-index --skip-worktree 生效
 # 恢复跟踪：git update-index --no-skip-worktree data/seen.json
 data/seen.json
+
+# macOS 目录元数据
+.DS_Store
+
+# 医院索引的中间产物：未压缩版与重建前备份，只留 hospitals.min.json.gz 入库
+data/hospitals.min.json
+data/*.bak

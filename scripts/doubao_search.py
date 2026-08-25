@@ -9,8 +9,14 @@
   - NeedUrl / NeedContent / Industry / ContentFormats
   - AuthInfoLevel 用官方语义（0 不限制 / 1 仅非常权威），不是 MCP 自造的 1~4
 
+2026-08-26 重构（依据官方文档核对 + 实测，详见 references/doubao.md、keywords.md §4/§11）：
+  - Query 全部改单词——官方明写「不支持多词搜索」，旧的多词清单实测返回 0 条
+  - Sites 白名单成为意图闸门，Query 只表达品类，不再拼 招标/采购 等意图词
+  - TimeRange 发 OneWeek 保召回，真正的日期收窄改在本地做（窄窗口实测把召回掐死）
+  - 启用 QueryRewrite（净增 10 条相关公告，不额外计费）、Industry=health、Count 放到上限 50
+
 顺带把阶段 1 的机械活接过来（见 SKILL.md 阶段 1、keywords.md §12）：
-  - 执行前校验：query 条数连续、每条带意图词、长度 ≤100 字符
+  - 执行前校验：query 条数连续、每条不含空格、长度 ≤100 字符
   - 跨 query 按 URL 去重，生成 found_by_query
   - 写 data/query_stats.json 的 raw / unique（pushed 由推送阶段回填）
 
@@ -48,18 +54,38 @@ ROOT = Path(__file__).resolve().parent.parent
 KEYWORDS_MD = ROOT / "references" / "keywords.md"
 CONFIG_FILE = ROOT / "config" / "doubao.json"
 STATS_FILE = ROOT / "data" / "query_stats.json"
+# 清单改版时必须同步 bump——编号在不同版本间指向完全不同的词，跨版本比较无意义。
+QUERY_LIST_VERSION = "v2-singleword-30"
 DEFAULT_ENDPOINT = "https://open.feedcoopapi.com/search_api/web_search"
 
 # 官方账号维度默认 5 QPS，留一档余量
 QPS = 4.0
 MAX_RETRY = 3
 
-# keywords.md §4 意图词库。按长度倒序匹配，避免"采购公告"被"采购"抢先命中
-INTENT_WORDS = sorted(
-    ["招标公告", "采购公告", "询价公告", "磋商公告", "谈判公告", "采购意向", "招标", "采购"],
-    key=len,
-    reverse=True,
-)
+# 2026-08-26：官方 Query 不支持多词搜索，意图约束已从 Query 层移到 Sites 白名单层。
+# 旧的 INTENT_WORDS 校验随之移除（历史与实测见 keywords.md §4）。
+#
+# Sites 默认白名单。三条硬性经验，改动前务必读 references/doubao.md：
+#   1. 子域不归并——bidcenter.com.cn 命中 0，m.bidcenter.com.cn 命中 17，必须写全
+#   2. 移动版子域索引普遍好于桌面版，能用 m. 就别用 www.
+#   3. 配错域名是静默返回 0，与"当天没公告"无法区分
+# API 上限 20 个，当前用 14 个，留 6 个余量。
+DEFAULT_SITES = [
+    "m.bidcenter.com.cn",        # 采招网（产出最高）
+    "m.bidizhaobiao.com",        # 比地招标
+    "m.zbytb.com",               # 中国招标与采购网
+    "www.yfbzb.com",             # 乙方宝（注意：不是清单里的 zb.yfb.qianlima.com，那是推广落地页）
+    "www.ylqxzb.com",            # 泰茂招标网（医疗器械）
+    "www.qianlima.com",          # 千里马
+    "www.bidcenter.com.cn",      # 采招网桌面版（与 m. 内容不完全重合）
+    "www.chinabidding.com.cn",   # 中国采购与招标网
+    "manage.gsei.com.cn",        # 甘肃经济信息网
+    "www.ccgp-xinjiang.gov.cn",  # 新疆政府采购网
+    "ccgp-bingtuan.gov.cn",      # 新疆兵团政府采购网
+    "www.ccgp-neimenggu.gov.cn", # 内蒙古政府采购网
+    "ggzyjyw.hlj.gov.cn",        # 黑龙江公共资源交易平台
+    "wisdombidding.com",         # 采管鹰
+]
 
 # 额度/鉴权类错误：立即中止，不要把剩余 query 全打成失败
 FATAL_CODES = {10401, 10403, 10406, 10409, 10410, 10412}
@@ -94,13 +120,17 @@ def load_config():
 # 优先级：命令行 > config/doubao.json 的 defaults > 这里的兜底值。
 # 命令行未给的参数在 argparse 里是 None，据此区分"没给"和"显式给了 0/false"。
 FALLBACK = {
-    "count": 20,
-    "time_range": "72h",
+    "count": 50,
+    "time_range": "OneWeek",
     "auth_level": 0,
     "need_url": 1,
     "need_content": 0,
-    "sites": None,
+    "sites": ",".join(DEFAULT_SITES),
     "block_hosts": None,
+    # Industry 与 Sites 互斥，实测叠加后归零（见 references/doubao.md）。默认不设。
+    "industry": None,
+    "query_rewrite": 1,
+    "keep_days": 3,
     "report_limit": 20,
 }
 
@@ -130,8 +160,12 @@ def parse_query_list():
     if marker not in text:
         raise Fatal(f"keywords.md 里找不到「{marker}」小节，无法解析清单")
     section = text.split(marker, 1)[1].split("\n## ", 1)[0]
-    items = re.findall(r"^(\d+)\.\s+(\S.*?)\s*$", section, re.M)
-    return [(int(n), q) for n, q in items]
+    # 2026-08-26 起 §5 是「| # | Query | 边际新增 | 累计覆盖 |」表格，Query 用反引号包裹。
+    items = re.findall(r"^\|\s*(\d+)\s*\|\s*`([^`]+)`\s*\|", section, re.M)
+    if not items:
+        # 兼容旧的「1. xxx」编号列表格式
+        items = re.findall(r"^(\d+)\.\s+(\S.*?)\s*$", section, re.M)
+    return [(int(n), q.strip()) for n, q in items]
 
 
 def validate_queries(queries, expected_total=None, full_list=False):
@@ -152,17 +186,18 @@ def validate_queries(queries, expected_total=None, full_list=False):
         if expected_total and len(nums) != expected_total:
             problems.append(f"条数不符：解析到 {len(nums)} 条，keywords.md §0 声明 {expected_total} 条")
     for n, q in queries:
-        if not any(q.endswith(w) for w in INTENT_WORDS):
-            problems.append(f"#{n} 末尾缺意图词：{q}")
+        # 官方 Query 明写「不支持多词搜索」，加空格实测直接归零（keywords.md §4）
+        if re.search(r"\s", q):
+            problems.append(f"#{n} 含空格，官方 Query 不支持多词搜索，实测返回 0 条：{q}")
         if len(q) > 100:
-            problems.append(f"#{n} 超过 API 的 100 字符上限（{len(q)} 字符），末尾意图词会被静默截断：{q}")
+            problems.append(f"#{n} 超过 API 的 100 字符上限（{len(q)} 字符）会被静默截断：{q}")
     return problems
 
 
 def declared_total():
     """读 keywords.md §0 声明的每日条数，用于交叉核对解析结果。"""
     text = KEYWORDS_MD.read_text(encoding="utf-8")
-    m = re.search(r"每日按「§5 每日 Query 清单」执行 \*\*(\d+)\s*条\*\*", text)
+    m = re.search(r"每日按「§5 每日 Query 清单」执行 \*\*(\d+)\s*条[^*]*\*\*", text)
     return int(m.group(1)) if m else None
 
 
@@ -186,6 +221,70 @@ def select_queries(all_queries, spec):
 
 
 # ---------------------------------------------------------------- 参数
+
+def local_window(value, keep_days):
+    """本地过滤窗口 (start, end)，闭区间；None 表示不按日期过滤。
+
+    与 api_time_range 配对使用：API 侧发宽窗口保召回，本地侧收窄到真正要的天数。
+    """
+    if not value:
+        return None
+    value = value.strip()
+    if value in {"OneMonth", "OneYear", "none"}:
+        return None                      # 本来就是宽窗口，不再收窄
+    end = date.today()
+    if value == "OneDay":
+        return end - timedelta(days=1), end
+    if value == "OneWeek":
+        return end - timedelta(days=7), end
+    m = re.fullmatch(r"(\d+)h", value)
+    if m:
+        return end - timedelta(days=(int(m.group(1)) + 23) // 24), end
+    m = re.fullmatch(r"(\d+)d", value)
+    if m:
+        return end - timedelta(days=int(m.group(1))), end
+    m = re.fullmatch(r"(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})", value)
+    if m:
+        return date.fromisoformat(m.group(1)), date.fromisoformat(m.group(2))
+    return None
+
+
+def api_time_range(value):
+    """发给 API 的 TimeRange。
+
+    2026-08-26 实测（Query 固定 '过敏原'）：2 日闭区间 → 0 条，OneWeek → 4 条，不传 → 20 条
+    （打满 Count 上限）。豆包的日期过滤依赖网页 PublishTime 元数据，多数页面没有或不可靠，
+    窗口一窄就把召回掐死。因此 ≤7 天的请求一律按 OneWeek 发出，真正的收窄交给 local_window。
+    """
+    win = local_window(value, None)
+    if win and (win[1] - win[0]).days <= 7:
+        return "OneWeek"
+    return build_time_range(value)
+
+
+def filter_by_publish_date(candidates, window):
+    """按发布日期本地收窄。缺发布时间的候选保留——API 侧已限定在一周内，
+    宁可多送进核实环节，也不因元数据缺失丢线索。"""
+    if not window:
+        return candidates, 0
+    start, end = window
+    kept, dropped = [], 0
+    for c in candidates:
+        day = (c.get("publish_time") or "")[:10]
+        if not day:
+            kept.append(c)
+            continue
+        try:
+            d = date.fromisoformat(day)
+        except ValueError:
+            kept.append(c)
+            continue
+        if start <= d <= end:
+            kept.append(c)
+        else:
+            dropped += 1
+    return kept, dropped
+
 
 def build_time_range(value):
     """72h/3d → 以今天为终点的滚动窗口；枚举和日期闭区间原样透传。"""
@@ -247,6 +346,10 @@ def build_payload(query, args, time_range):
         payload["TimeRange"] = time_range
     if args.industry:
         payload["Industry"] = args.industry
+    # QueryRewrite 让 API 自动改写 Query 扩召回。2026-08-26 A/B 实测（30 词单词表 + Sites 白名单）：
+    # 关闭 81 条相关公告，开启 91 条，净增 +10；代价是平均耗时 768ms → 1028ms，调用次数不变。
+    if args.query_rewrite:
+        payload["QueryControl"] = {"QueryRewrite": True}
     return payload
 
 
@@ -465,7 +568,12 @@ def write_stats(stats, run_date):
     if not STATS_FILE.exists():
         raise Fatal(f"找不到 {STATS_FILE.relative_to(ROOT)}，无法写归因统计")
     data = json.loads(STATS_FILE.read_text(encoding="utf-8"))
-    data.setdefault("days", {})[run_date] = stats
+    # query 编号的含义随清单改版而变（2026-08-26：编号 1 由「过敏原检测 过敏检测…」变为「试剂」）。
+    # 打版本戳，避免跨版本的 raw/unique 被当成同一条 query 的时间序列比较。
+    data.setdefault("days", {})[run_date] = {
+        "query_list_version": QUERY_LIST_VERSION,
+        "queries": stats,
+    }
     STATS_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -535,15 +643,25 @@ def main():
     p = argparse.ArgumentParser(description="豆包搜索 Custom 版直连调用器")
     p.add_argument("--query", help="单条即席查询，绕过 keywords.md 清单")
     p.add_argument("--queries", default="all", help="清单选择：all（默认）或 1-4,39 这类表达式")
+    p.add_argument("--sites-off", action="store_true",
+                   help="本次不使用 Sites 白名单（全网检索）。诊断用；常规运行不要开，白名单是意图闸门")
     p.add_argument("--time-range",
                    help="72h 滚动窗口（默认）/ 3d / OneDay|OneWeek|OneMonth|OneYear / 2026-08-01..2026-08-10 闭区间 / none 不限制")
-    p.add_argument("--count", type=int, help="每条返回数，1~50（默认 20）")
+    p.add_argument("--count", type=int, help="每条返回数，1~50（默认 50，官方上限）")
     p.add_argument("--auth-level", type=int, choices=[0, 1],
-                   help="官方语义：0 不限制（默认，本管线要的）/ 1 仅非常权威")
-    p.add_argument("--sites", help="站点白名单，逗号分隔，最多 20 个完整域名。注意是排他性限定")
+                   help="官方语义：0 不限制（默认，本管线要的）/ 1 仅非常权威。**不要设 1**：实测它不是过滤器而是"
+                        "换一套召回，会把带公告的聚合站整体滤掉，只剩机构官网和央媒")
+    p.add_argument("--sites", help="站点白名单，逗号分隔，最多 20 个完整域名。排他性限定；"
+                                   "子域不归并，必须写全（m.x.com ≠ x.com），详见 references/doubao.md")
     p.add_argument("--block-hosts", help="屏蔽域名，逗号分隔，最多 5 个。默认取 config 里的噪声域名表")
     p.add_argument("--no-block", action="store_true", help="本次不屏蔽任何域名，覆盖 config 默认")
-    p.add_argument("--industry", choices=["finance", "game", "gov"], help="行业限定；gov 比『非常权威』更严")
+    p.add_argument("--industry", choices=["finance", "game", "health", "gov"],
+                   help="行业限定；默认不设。**与 --sites 互斥**：实测叠加后结果归零（招标聚合站不属"
+                        "医疗健康或政府站点）。只在 --sites-off 做全网检索时才考虑 health")
+    p.add_argument("--query-rewrite", type=int, choices=[0, 1],
+                   help="1=开启官方 Query 改写（默认）。实测净增 10 条相关公告，耗时 +34%%，不额外计费")
+    p.add_argument("--keep-days", type=int,
+                   help="本地日期过滤保留天数；仅在 --time-range 用 72h/3d 这类滚动窗口时生效")
     p.add_argument("--content-format", default="markdown", choices=["text", "markdown"])
     p.add_argument("--need-url", type=int, choices=[0, 1], help="1=只要有落地页URL的结果（默认）")
     p.add_argument("--need-content", type=int, choices=[0, 1], help="1=只要有正文的结果")
@@ -559,6 +677,8 @@ def main():
         args = resolve_defaults(args, cfg)
         if args.no_block:
             args.block_hosts = None
+        if args.sites_off:
+            args.sites = None
 
         if not 1 <= args.count <= 50:
             print(f"错误：--count 需在 1~50 之间（官方上限 50），给了 {args.count}", file=sys.stderr)
@@ -567,7 +687,9 @@ def main():
             print(f"错误：--report-limit 不能小于 0，给了 {args.report_limit}", file=sys.stderr)
             return 1
 
-        time_range = None if args.time_range == "none" else build_time_range(args.time_range)
+        # API 侧发宽窗口保召回，本地侧按 window 收窄（见 api_time_range 的实测数据）
+        time_range = None if args.time_range == "none" else api_time_range(args.time_range)
+        window = None if args.time_range == "none" else local_window(args.time_range, args.keep_days)
 
         if args.query:
             queries = [(0, args.query.strip())]
@@ -611,6 +733,9 @@ def main():
 
         fatal = [r for r in runs if r.get("fatal")]
         candidates = dedup_candidates(runs)
+        candidates, date_dropped = filter_by_publish_date(candidates, window)
+        if date_dropped:
+            print(f"本地日期过滤：窗口 {window[0]}~{window[1]}，剔除窗口外 {date_dropped} 条")
         stats = compute_stats(runs, candidates)
 
         run_date = date.today().isoformat()

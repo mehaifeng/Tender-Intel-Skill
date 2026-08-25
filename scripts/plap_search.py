@@ -85,9 +85,17 @@ TARGET_TERMS = [
     ("免疫印迹", re.compile(r"免疫印迹", re.I)),
     ("免疫分析仪", re.compile(r"免疫分析仪", re.I)),
     ("酶免仪", re.compile(r"全自动酶免|酶免工作站|酶免仪", re.I)),
-    ("酶标仪", re.compile(r"酶标仪", re.I)),
-    ("洗板机", re.compile(r"洗板机", re.I)),
+    # 2026-08-26 与 CCGP 词表双向对齐（见 references/ccgp.md「默认单词 Query」）。
+    # 移除 酶标仪 / 洗板机：业务方确认公司不做此品类（keywords.md §10.1）。
+    ("检验试剂", re.compile(r"检验试剂|试剂耗材|体外诊断试剂", re.I)),
+    ("检验设备", re.compile(r"检验设备|生化免疫", re.I)),
 ]
+
+# 明确不属于本司产品域，命中即判无关，优先级高于 TARGET_TERMS（keywords.md §10.1）
+EXCLUDE_TERMS = re.compile(
+    r"酶标仪|电泳|兽医|兽用|畜牧|生猪|结核|干扰素释放|免疫组化|重组蛋白|培养基|缓冲液|核酸|PCR|测序",
+    re.I,
+)
 PROVINCE_SHORT = {
     "北京市": "北京", "天津市": "天津", "上海市": "上海", "重庆市": "重庆",
     "河北省": "河北", "山西省": "山西", "辽宁省": "辽宁", "吉林省": "吉林",
@@ -253,7 +261,11 @@ def notice_type_name(code):
 
 
 def matched_target_terms(text):
-    return [name for name, pattern in TARGET_TERMS if pattern.search(text or "")]
+    """命中的目标品类词。硬排除优先——即使同时含目标信号也返回空。"""
+    text = text or ""
+    if EXCLUDE_TERMS.search(text):
+        return []
+    return [name for name, pattern in TARGET_TERMS if pattern.search(text)]
 
 
 def province_short(region):

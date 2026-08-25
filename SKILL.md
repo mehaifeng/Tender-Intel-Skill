@@ -135,4 +135,6 @@ Windows旧任务可继续使用字段与门禁一致的`scripts/send_webhook.ps1
 
 所有批次进入终态；所有推送载荷严格为固定15字段、单条、平铺、全字符串、无JSON null；成功回执已登记；摘要按来源披露检索失败，并披露跨来源重复、创建、排除、本地manual和推送成功数。
 
-仅修改 Doubao 检索词时读取[关键词与Query](references/keywords.md)；修改 CCGP 或 PLAP 检索词时分别读取对应适配器参考文件。
+仅修改 Doubao 检索词时读取[关键词与Query](references/keywords.md)；调整 Doubao 调用参数、`Sites` 白名单或排查召回异常时读取[豆包适配器](references/doubao.md)；修改 CCGP 或 PLAP 检索词时分别读取对应适配器参考文件。
+
+Doubao 的 Query 必须是**单个不含空格的词**（官方不支持多词搜索），意图约束由 `Sites` 白名单承担，不在 Query 里拼 `招标`/`采购`。
