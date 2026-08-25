@@ -101,7 +101,10 @@ class HospitalIndex:
             for key in keys:
                 for record_index, key_kind in self.exact.get(key, []):
                     record = self.records[record_index]
-                    if not geo_matches(record, province, city, district):
+                    # explicit 全名/别名命中是确定性匹配，geo hint 只用于 text 来源的
+                    # 预过滤；行政区域新旧名称差异（平坝区 vs 平坝县）不得否决 explicit
+                    # 命中，同名消歧由下方 grouped 阶段按 (名称,省,市,区县) 分组处理。
+                    if origin != "explicit" and not geo_matches(record, province, city, district):
                         continue
                     priority = {
                         ("explicit", "name"): 4,
