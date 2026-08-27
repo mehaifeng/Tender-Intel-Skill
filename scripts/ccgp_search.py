@@ -305,6 +305,43 @@ def _iso_datetime(text):
     return value
 
 
+# 政府采购公告有两种写法。带冒号那种旧规则一直能抽：
+#     投标截止时间：2026年09月16日 09时00分
+# 但国办标准模板是小节标题换行给值、没有冒号，旧规则整块抽不到：
+#     四、提交投标文件截止时间、开标时间和地点
+#     2026年09月16日 09时00分00秒 （北京时间）
+# 2026-08-27 实测：226 条正文里 117 条有截止语句，旧规则只抽到 27 条。
+_DEADLINE_LABEL = (
+    r"(?:提交投标文件截止时间|投标文件递交截止时间|响应文件提交截止时间"
+    r"|投标截止时间|响应文件开启时间)"
+)
+_DEADLINE_DT = (
+    r"20\d{2}\s*[-/年]\s*\d{1,2}\s*[-/月]\s*\d{1,2}\s*日?"
+    r"\s*(?:[^\n\d]{0,4})?[0-2]?\d\s*[:时]\s*[0-5]\d(?:\s*[:分]\s*[0-5]\d)?\s*秒?"
+)
+_DEADLINE_COLON_RE = re.compile(_DEADLINE_LABEL + r"\s*[：:]\s*(" + _DEADLINE_DT + r")")
+# 标签到日期之间只放非数字字符——放开数字会跨过第一个日期抓到下一个
+_DEADLINE_HEADING_RE = re.compile(_DEADLINE_LABEL + r"[^\n\d]{0,24}?\s*(" + _DEADLINE_DT + r")")
+_DEADLINE_DT_RE = re.compile(_DEADLINE_DT)
+
+
+def _extract_deadline(full_text):
+    """返回 (值, 证据)；取不到或有歧义时返回 ("", "")。"""
+    match = _DEADLINE_COLON_RE.search(full_text)
+    if not match:
+        match = _DEADLINE_HEADING_RE.search(full_text)
+        if not match:
+            return "", ""
+        # 更正公告把原/现两个时间并排写：
+        #     投标文件递交截止时间 2026年09月01日11时00分 2026年09月11日11时00分
+        # 抓到的第一个正是作废的旧时间。填错的截止时间比留空危险，宁可不填。
+        if _DEADLINE_DT_RE.search(full_text[match.end():match.end() + 80]):
+            return "", ""
+    raw = match.group(1).strip()
+    # 飞书侧按文本消费、不依赖格式，所以 ISO 解不出来时保留原文，好过整条丢掉。
+    return (_iso_datetime(raw) or raw), match.group(0)
+
+
 def _budget_yuan(text):
     match = re.search(r"[￥¥]?\s*([\d,.]+)\s*万元", text)
     if match:
@@ -390,13 +427,9 @@ def parse_detail_page(html, url, search_item=None):
     if method_match:
         put("采购方式", method_match.group(1), method_match.group(0))
 
-    deadline_match = re.search(
-        r"(?:提交投标文件截止时间|响应文件提交截止时间|投标截止时间|响应文件开启时间)\s*[：:]\s*"
-        r"(20\d{2}[^\n]{0,30}?(?:[0-2]?\d\s*[:时]\s*[0-5]\d(?:\s*分)?))",
-        full_text,
-    )
-    if deadline_match:
-        put("截止时间", _iso_datetime(deadline_match.group(1)), deadline_match.group(0))
+    deadline, deadline_evidence = _extract_deadline(full_text)
+    if deadline:
+        put("截止时间", deadline, deadline_evidence)
 
     budget_text = _table_value(parser.rows, "预算金额")
     if not budget_text:

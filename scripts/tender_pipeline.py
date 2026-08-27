@@ -20,6 +20,7 @@ from hospital_match import get_default_index
 from search_common import (
     canonical_url,
     ccgp_article_id,
+    notice_family,
     plap_notice_id,
     target_category_signals,
     title_fingerprint as common_title_fingerprint,
@@ -82,6 +83,17 @@ PROCUREMENT_INTENT_RE = re.compile(
     r"中标|成交|合同|采购意向|需求调查|市场调研|参数征集|供应商征集|"
     r"结果公示|候选人公示|废标|流标|更正|变更|终止|撤销",
     re.I,
+)
+# 已有结论的公告族：中标/成交/结果、废标/流标/终止/撤销、采购合同。
+# 这些标的已经定了，进核实既产不出可行动情报也白占批次（2026-08-27 实测占过筛候选 45%）。
+# 意图词表把它们算作有效招采意图（那是"是不是招采信息"的判断），阶段闸门在这里单独把关。
+# 保留 更正/变更——在售标的改截止时间或参数，仍然可行动。
+TERMINAL_NOTICE_FAMILIES = ("结果", "终止", "合同")
+# notice_family 的 合同 族只认「合同公告 / 采购合同」，漏掉以「…合同」「…合同备案」收尾的标题；
+# 它的 结果 族也不含「结果公示」，而「结果更正公告」会先被 更正 族接走。这里补齐，
+# 但不改 notice_family 本身——它同时是去重键的一部分，改它会动公告身份。
+TERMINAL_TITLE_RE = re.compile(
+    r"(?:合同|合同备案)\s*$|结果公示|成交公示|结果更正|候选人公示|履约验收"
 )
 CLEAR_EXCLUDES = [
     re.compile(pattern, re.I)
@@ -225,6 +237,14 @@ def is_clear_exclude(title):
 
 def has_procurement_intent(title):
     return bool(PROCUREMENT_INTENT_RE.search(title or ""))
+
+
+def terminal_notice_family(title):
+    """标的已有结论时返回其公告族，否则返回空串。"""
+    family = notice_family(title)
+    if family in TERMINAL_NOTICE_FAMILIES:
+        return family
+    return "合同/结果" if TERMINAL_TITLE_RE.search(title or "") else ""
 
 
 QUERY_STOPWORDS = {
@@ -441,6 +461,7 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
     queue = []
     already_seen = []
     screened_out = []
+    concluded = []
     hospital_index = get_default_index()
     clustered = cluster_candidates(candidates)
     for item in clustered:
@@ -456,6 +477,10 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             continue
         if not has_procurement_intent(item.get("title", "")):
             screened_out.append({**item, "skip_reason": "标题缺少招采/交易意图词"})
+            continue
+        terminal = terminal_notice_family(item.get("title", ""))
+        if terminal:
+            concluded.append({**item, "skip_reason": f"标的已有结论（{terminal}公告）"})
             continue
 
         content_path, content = load_candidate_content(item, search_dir)
@@ -487,9 +512,18 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             "matched_keywords": matched_query_keywords(item, retrieved_text),
             "departments": extract_departments(retrieved_text),
         }
+        # 带上来源自带的地理，和核实阶段的调用口径一致。不带提示时，标题里截出的
+        # 机构名没有任何东西能纠偏——「新疆…第三人民医院」曾整批匹到湖南的岳阳县血防医院。
+        source_fields = enriched["search_evidence"]["source_fields"]
+        hint_province, hint_city = hospital_geo_hints(
+            *parse_province_city(source_fields.get("所属省/市") or "")
+        )
         suggestion = hospital_index.match(
-            name=item.get("site_name", ""),
+            name=source_fields.get("单位") or item.get("site_name", ""),
             text=f"{item.get('title', '')}\n{summary if summary != 'null' else ''}",
+            province=hint_province,
+            city=hint_city,
+            district=source_fields.get("地区") or "",
         )
         if suggestion.get("matched") or suggestion.get("ambiguous"):
             enriched["hospital_suggestion"] = suggestion
@@ -499,6 +533,7 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
     write_jsonl(pipeline_dir / "queue.jsonl", queue)
     write_jsonl(pipeline_dir / "already_seen.jsonl", already_seen)
     write_jsonl(pipeline_dir / "screened_out.jsonl", screened_out)
+    write_jsonl(pipeline_dir / "concluded.jsonl", concluded)
 
     batches = []
     for offset in range(0, len(queue), batch_size):
@@ -546,6 +581,7 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             "queued": len(queue),
             "already_seen": len(already_seen),
             "screened_out": len(screened_out),
+            "concluded": len(concluded),
             "completed_batches": 0,
         },
         "batches": batches,
@@ -757,11 +793,19 @@ def canonicalize_create(row, candidate):
             record[field] = value
         if record["单位"] == "null":
             record["单位"] = match.get("hospital_name") or "null"
-        if record["所属省/市"] == "null" and match.get("province"):
-            record["所属省/市"] = canonical_province(match.get("province"), match.get("city"))
-        matched_locality = match.get("district") or match.get("city")
-        if matched_locality and (record["地区"] == "null" or region_is_province_only(record["地区"])):
-            record["地区"] = matched_locality
+        # 索引里有一批记录的地理字段和自身名字矛盾（故城县中医医院被编码到云南丽江），
+        # 拿它回填会把省份/地区/大区一路填错，直接发错人。名称和等级不受影响。
+        geo_trusted = match.get("geo_trusted", True)
+        if not geo_trusted:
+            add_adjustment(row, "医院索引地理", match.get("province"), "不采用",
+                           "索引地理与医院名地名矛盾，仅用其名称与等级")
+        if geo_trusted:
+            if record["所属省/市"] == "null" and match.get("province"):
+                record["所属省/市"] = canonical_province(match.get("province"), match.get("city"))
+            matched_locality = match.get("district") or match.get("city")
+            if matched_locality and (record["地区"] == "null"
+                                     or region_is_province_only(record["地区"])):
+                record["地区"] = matched_locality
         field_evidence["医院全名"] = f"全国医院索引{match.get('match_method')}唯一匹配"
         field_evidence["医院等级"] = "来自全国医院索引；等级冲突时自动置空"
     else:

@@ -1,0 +1,181 @@
+"""字段质量回归：品类信号、截止时间、医院匹配、省份与地区规范化。
+
+这批用例都对应 2026-08-27 在真实数据上量到的缺陷，别随手放宽。
+"""
+import sys
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from ccgp_search import _extract_deadline  # noqa: E402
+from hospital_match import (  # noqa: E402
+    geo_is_suspect,
+    geo_matches,
+    get_default_index,
+    is_generic_org_name,
+    loose_key,
+)
+from search_common import target_category_signals  # noqa: E402
+from tender_pipeline import canonical_province, normalize_region_location  # noqa: E402
+
+
+class CategorySignalTests(unittest.TestCase):
+    def test_enzyme_plate_reader_is_not_a_positive_signal(self):
+        """酶标仪是业务方确认不做的品类（keywords.md §10.1），不能当命中理由。"""
+        self.assertEqual(target_category_signals("某医院全自动酶标仪采购项目公开招标公告"), [])
+
+    def test_mixed_bundle_still_matches_on_a_real_target(self):
+        """只把酶标仪从信号里摘掉，不做硬排除——混合包里的酶免仪仍要能命中。"""
+        self.assertIn(
+            "免疫分析仪器",
+            target_category_signals("某医院全自动酶免仪、酶标仪及洗板机采购项目"),
+        )
+
+
+class DeadlineExtractionTests(unittest.TestCase):
+    def test_heading_form_without_colon(self):
+        """国办标准模板是小节标题换行给值。旧规则要求紧跟冒号，整块抽不到。"""
+        text = "四、提交投标文件截止时间、开标时间和地点 2026年09月16日 09时00分00秒 （北京时间）"
+        self.assertEqual(_extract_deadline(text)[0], "2026-09-16T09:00")
+
+    def test_colon_form_still_works(self):
+        self.assertEqual(
+            _extract_deadline("投标截止时间：2026年09月16日 09时00分")[0], "2026-09-16T09:00")
+
+    def test_iso_source_format(self):
+        text = "提交投标文件截止时间、开标时间和地点 2026-09-18 08:30:00（北京时间）"
+        self.assertEqual(_extract_deadline(text)[0], "2026-09-18T08:30")
+
+    def test_correction_notice_with_two_datetimes_yields_nothing(self):
+        """更正公告并排写原/现两个时间，抓第一个就是作废的旧时间。填错比留空危险。"""
+        for text in (
+            "3开标时间、投标文件递交截止时间2026年09月01日11时00分（北京时间）"
+            "2026年09月11日11时00分（北京时间）",
+            "投标文件递交截止时间：“2026年08月26日9:00” 现更正为：“2026年08月27日9:00”",
+        ):
+            with self.subTest(text=text[:24]):
+                self.assertEqual(_extract_deadline(text)[0], "")
+
+    def test_dead_tender_without_datetime_yields_nothing(self):
+        self.assertEqual(
+            _extract_deadline("至投标文件递交截止时间止，递交投标文件的供应商不足法定三家")[0], "")
+
+
+class HospitalMatchTests(unittest.TestCase):
+    def setUp(self):
+        self.index = get_default_index()
+
+    def test_renamed_county_matches_city_spelling(self):
+        """弥勒 2013 年撤县设市；公告写「市」而索引存「县」，精确键对不上。"""
+        match = self.index.match(name="弥勒市人民医院")
+        self.assertTrue(match["matched"])
+        self.assertEqual(match["hospital_name"], "弥勒县人民医院")
+        self.assertEqual(match["match_method"], "loose_name")
+
+    def test_loose_key_drops_division_suffix(self):
+        self.assertEqual(loose_key("弥勒市人民医院"), loose_key("弥勒县人民医院"))
+
+    def test_mislabelled_record_keeps_name_but_not_geography(self):
+        """故城县在河北衡水，索引把它编码到了云南丽江（故城→古城）。
+        名称与等级仍可用，地理绝不能回填，否则省份/大区全错、消息发错人。"""
+        match = self.index.match(name="故城县中医医院")
+        self.assertTrue(match["matched"])
+        self.assertFalse(match["geo_trusted"])
+
+    def test_consistent_record_is_geo_trusted(self):
+        for name in ("宾县人民医院", "宁夏回族自治区人民医院", "余姚市第二人民医院"):
+            with self.subTest(name=name):
+                match = self.index.match(name=name)
+                self.assertTrue(match["matched"])
+                self.assertTrue(match["geo_trusted"])
+
+    def test_geo_suspect_needs_a_real_contradiction(self):
+        self.assertFalse(geo_is_suspect({"n": "宾县人民医院", "p": "黑龙江省",
+                                         "c": "哈尔滨市", "d": "宾县"}))
+        self.assertTrue(geo_is_suspect({"n": "故城县中医医院", "p": "云南省",
+                                        "c": "丽江", "d": "古城"}))
+
+
+class GenericNameHijackTests(unittest.TestCase):
+    """通用机构名不得劫持匹配。
+
+    岳阳县血防医院（湖南）的别名就叫「第三人民医院」，于是
+    「新疆维吾尔自治区第三人民医院」的三条公告整批被它匹走，
+    连省份提示都挡不住——当时子串命中走的是豁免地理校验的 explicit 通道。
+    """
+
+    def test_generic_names_are_recognised(self):
+        for key in ("第三人民医院", "人民医院", "中心医院", "第一人民医院", "妇幼保健院", "医院"):
+            with self.subTest(key=key):
+                self.assertTrue(is_generic_org_name(key))
+
+    def test_place_qualified_names_are_not_generic(self):
+        """不能退回长度阈值：漳州市医院 5 字、宾县人民医院 6 字，都是具体医院。"""
+        for key in ("宾县人民医院", "漳州市医院", "余姚市第二人民医院", "佛山市顺德区第一人民医院"):
+            with self.subTest(key=key):
+                self.assertFalse(is_generic_org_name(key))
+
+    def test_generic_suffix_does_not_match_a_different_hospital(self):
+        index = get_default_index()
+        for hints in ({}, {"province": "新疆"}):
+            with self.subTest(hints=hints):
+                match = index.match(name="新疆维吾尔自治区第三人民医院", **hints)
+                self.assertNotEqual(match.get("hospital_name"), "岳阳县血防医院")
+
+    def test_generic_suffix_in_free_text_is_also_blocked(self):
+        """prepare 阶段是拿标题当 text 匹的，这条通道同样会被通用名劫持。"""
+        index = get_default_index()
+        match = index.match(
+            name="",
+            text="新疆维吾尔自治区第三人民医院检验科全自动化学发光免疫分析仪采购项目公开招标公告",
+        )
+        self.assertNotEqual(match.get("hospital_name"), "岳阳县血防医院")
+
+
+class GeoHintTests(unittest.TestCase):
+    def test_hint_may_match_any_administrative_level(self):
+        """调用方给的层级不可靠：CCGP 的「所属省/市」常是「宾县」「平和县」这类地名。
+        按层级对号入座会把真匹配误杀。"""
+        record = {"n": "宾县人民医院", "p": "黑龙江省", "c": "哈尔滨市", "d": "宾县"}
+        self.assertTrue(geo_matches(record, province="宾县"))
+        self.assertTrue(geo_matches(record, province="黑龙江"))
+
+    def test_cross_province_hint_still_rejected(self):
+        """放宽层级不等于放弃把关——跨省的错配仍要拦住。"""
+        record = {"n": "宁波北仑大港医院", "p": "浙江省", "c": "宁波市", "d": "北仑区"}
+        self.assertFalse(geo_matches(record, province="天津", city="滨海新区"))
+
+
+class RegionFieldTests(unittest.TestCase):
+    """飞书侧的分发依赖这两个字段：省份必须无后缀，地区必须带省级全称。"""
+
+    def test_province_has_no_administrative_suffix(self):
+        for raw, expected in (
+            ("新疆维吾尔自治区", "新疆"), ("青海省", "青海"), ("北京市", "北京"),
+            ("广东省", "广东"), ("广西壮族自治区", "广西"), ("内蒙古自治区", "内蒙古"),
+            ("宁夏回族自治区", "宁夏"), ("新疆生产建设兵团", "新疆"),
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(canonical_province(raw), expected)
+
+    def test_region_always_carries_the_province(self):
+        for location, province, expected in (
+            ("呼和浩特市", "内蒙古", "内蒙古自治区呼和浩特市"),
+            ("朝阳区", "北京", "北京市朝阳区"),
+            ("凤阳县", "安徽", "安徽省凤阳县"),
+            ("乌鲁木齐市", "新疆", "新疆维吾尔自治区乌鲁木齐市"),
+            ("新疆维吾尔自治区乌鲁木齐市", "新疆", "新疆维吾尔自治区乌鲁木齐市"),
+        ):
+            with self.subTest(location=location):
+                self.assertEqual(normalize_region_location(location, province), expected)
+
+    def test_bare_locality_without_known_province_is_dropped(self):
+        """省份不明时宁可置空，也不能留一个孤立地名让人猜该发给谁。"""
+        self.assertEqual(normalize_region_location("某地", "null"), "null")
+
+
+if __name__ == "__main__":
+    unittest.main()
