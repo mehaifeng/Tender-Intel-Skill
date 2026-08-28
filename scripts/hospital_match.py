@@ -64,8 +64,22 @@ def loose_key(value):
     return re.sub(r"[市县区]", "", normalize(value))
 
 
-# 名字打头的地名（故城县、呼和浩特市…）
-NAME_LOCALITY_RE = re.compile(r"^([一-鿿]{2,4})[市县区州盟旗]")
+# 名字打头的地名（故城县、呼和浩特市、山东省…）
+# 「省」在列，是因为「山东省南山医院」这类全称打头的记录同样会被错编码
+# （该条被编到四川内江市中区）。代价是「武警云南省总队医院」会截出「武警云」
+# 而被误标，那是安全方向——最多不回填地理，不会填错。
+NAME_LOCALITY_RE = re.compile(r"^([一-鿿]{2,4})[市县区州盟旗省]")
+
+
+def _name_locality(record):
+    """(名字打头的地名, 记录自身地理字段) 归一化后的一对；截不出地名时为 None。"""
+    match = NAME_LOCALITY_RE.match(str(record.get("n") or ""))
+    if not match:
+        return None
+    geo = normalize("".join(str(record.get(field) or "") for field in ("p", "c", "d")))
+    if not geo:
+        return None
+    return normalize(match.group(1)), geo
 
 
 def geo_is_suspect(record):
@@ -79,11 +93,19 @@ def geo_is_suspect(record):
     标记出来，只禁止它回填地理，名称和等级仍然可用。
     异体字（滕冲/腾冲）也会被标上，那是安全方向的误判——最多不回填，不会填错。
     """
-    match = NAME_LOCALITY_RE.match(str(record.get("n") or ""))
-    if not match:
-        return False
-    geo = normalize("".join(str(record.get(field) or "") for field in ("p", "c", "d")))
-    return bool(geo) and normalize(match.group(1)) not in geo
+    locality = _name_locality(record)
+    return bool(locality) and locality[0] not in locality[1]
+
+
+def geo_is_confirmed(record):
+    """名字打头的地名确实出现在记录自身的地理字段里——地理正面自洽。
+
+    严格于 `not geo_is_suspect(...)`：名字里根本没有地名的记录两者都不是，
+    它只是无从判断。消歧必须押在正面自洽上，不能押在「没被标记」上——
+    否则一条无地名的脏记录会白捡一次胜出。
+    """
+    locality = _name_locality(record)
+    return bool(locality) and locality[0] in locality[1]
 
 
 def geo_matches(record, province="", city="", district=""):
@@ -144,6 +166,31 @@ class HospitalIndex:
                 longest = max(map(len, matches))
                 found.update(key for key in matches if len(key) == longest)
         return found
+
+    def _disambiguate_same_name(self, grouped, province, city, district):
+        """在同名候选之间挑一组，挑不出就原样返回。返回 (分组, 是否靠提示挑的)。
+
+        先用调用方的地理提示。整名命中不过 geo 门禁是为了「不否决匹配」（平坝区 vs
+        平坝县这类改名会误杀），而这里是在几个已确定同名的候选之间挑一个：挑得出
+        就是它，挑不出就退回，不会挑错。
+        """
+        hinted = {group_key: group_hits for group_key, group_hits in grouped.items()
+                  if any(geo_matches(self.records[hit[2]], province, city, district)
+                         for hit in group_hits)}
+        if len(hinted) == 1:
+            return hinted, True
+
+        # 没有提示或提示裁决不了，就剔掉地理与自身名字矛盾的那些组。
+        # 幸存者还必须正面自洽，光是「没被标记」不够（见 geo_is_confirmed）：
+        # 2026-08-28 全量实测 912 次触发全部满足，这层约束当下零代价，挡的是
+        # 将来索引换源后冒出来的风险形态——一条无地名的脏记录白捡一次胜出。
+        trusted = {group_key: group_hits for group_key, group_hits in grouped.items()
+                   if not all(geo_is_suspect(self.records[hit[2]]) for hit in group_hits)}
+        if len(trusted) == 1:
+            survivor = next(iter(trusted.values()))
+            if any(geo_is_confirmed(self.records[hit[2]]) for hit in survivor):
+                return trusted, False
+        return grouped, False
 
     def match(self, name="", text="", province="", city="", district=""):
         hits = []
@@ -207,6 +254,19 @@ class HospitalIndex:
             )
             grouped[group_key].append(hit)
 
+        # 索引里有 1983 组同名但地理冲突的重复记录（多为音近地名被编错：临湘→临翔、
+        # 故城→古城、保山→宝山），它们会把一次本该唯一的匹配堵成歧义。整名命中按
+        # 设计不过 geo 门禁（见上），拦不住这种，于是连带上正确的省份提示都匹不上。
+        #
+        # 只在候选同名时消歧。名字不同（朝阳区 vs 朝阳市人民医院）是两家真医院，
+        # 那时 suspect 只说明其地理不可信，不足以判定它不是要找的那一家。
+        geo_disambiguated = False
+        geo_from_hint = False
+        if len(grouped) > 1 and len({group_key[0] for group_key in grouped}) == 1:
+            grouped, geo_from_hint = self._disambiguate_same_name(
+                grouped, province, city, district)
+            geo_disambiguated = len(grouped) == 1
+
         if len(grouped) != 1:
             return {
                 "matched": False,
@@ -235,8 +295,17 @@ class HospitalIndex:
             "match_method": f"{method_hit[3]}_{method_hit[4]}",
             "match_key": method_hit[5],
             "level_conflict": len(levels) > 1,
-            # False = 该记录的地理字段与自身名字矛盾，不得用来回填省份/地区
-            "geo_trusted": not any(geo_is_suspect(record) for record in records),
+            # False = 不得用来回填省份/地区。两种情形：
+            # 一是记录的地理字段与自身名字矛盾；
+            # 二是它本来就是「因为和调用方提示吻合」才从同名候选里被选出来的——
+            # 再拿它的地理回填是循环论证。好的情况只是复述提示，坏的情况会把错提示
+            # 洗成确信字段：索引里那条挂在四川内江的「山东中医药大学附属眼科医院」
+            # 名字不带行政区划前缀，geo_is_suspect 看不见它，提示写四川就会选中它。
+            # 名称与等级不受影响，那才是这次匹配真正的增量。
+            "geo_trusted": not geo_from_hint and not any(geo_is_suspect(record)
+                                                         for record in records),
+            # True = 曾有同名不同地理的候选，靠提示或剔除脏记录才收敛到这一家
+            "geo_disambiguated": geo_disambiguated,
         }
 
 

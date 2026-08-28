@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from ccgp_search import _extract_deadline  # noqa: E402
 from hospital_match import (  # noqa: E402
+    geo_is_confirmed,
     geo_is_suspect,
     geo_matches,
     get_default_index,
@@ -97,6 +98,68 @@ class HospitalMatchTests(unittest.TestCase):
                                          "c": "哈尔滨市", "d": "宾县"}))
         self.assertTrue(geo_is_suspect({"n": "故城县中医医院", "p": "云南省",
                                         "c": "丽江", "d": "古城"}))
+
+    def test_province_full_form_is_a_locality_too(self):
+        """「山东省南山医院」被编码到四川内江。字符类漏了「省」就抓不到这一类。"""
+        self.assertTrue(geo_is_suspect({"n": "山东省南山医院", "p": "四川省",
+                                        "c": "内江市", "d": "市中区"}))
+
+    def test_geo_confirmed_is_stricter_than_not_suspect(self):
+        """名字里没有地名的记录：既不可疑，也不算自洽——只是无从判断。
+
+        消歧押的是正面自洽，不能押在「没被标记」上，否则一条无地名的脏记录
+        会白捡一次胜出。
+        """
+        nameless = {"n": "协和专科医院", "p": "内蒙古", "c": "乌海市", "d": "海南区"}
+        self.assertFalse(geo_is_suspect(nameless))
+        self.assertFalse(geo_is_confirmed(nameless))
+        # 「宾县」的地名只有「宾」一个字，够不着正则的 {2,4} 下限，同样属于无从判断
+        short = {"n": "宾县人民医院", "p": "黑龙江省", "c": "哈尔滨市", "d": "宾县"}
+        self.assertFalse(geo_is_suspect(short))
+        self.assertFalse(geo_is_confirmed(short))
+        self.assertTrue(geo_is_confirmed({"n": "故城县中医院", "p": "河北省",
+                                          "c": "衡水市", "d": "故城县"}))
+
+    def test_same_name_conflict_resolved_by_self_consistency(self):
+        """索引里「临湘市人民医院」既挂在湖南岳阳临湘市，也挂在云南临沧临翔区
+        （临湘被编码成同音的临翔）。后者地理与自身名字矛盾，剔掉它就唯一了，
+        无需调用方给任何提示。"""
+        match = self.index.match(name="临湘市人民医院")
+        self.assertTrue(match["matched"])
+        self.assertTrue(match["geo_disambiguated"])
+        self.assertEqual(match["province"], "湖南省")
+        self.assertTrue(match["geo_trusted"])
+
+    def test_hint_resolved_match_must_not_backfill_geography(self):
+        """「山东中医药大学附属眼科医院」的脏副本挂在四川内江，且名字不以行政区划
+        打头，geo_is_suspect 看不见它——只能靠调用方提示裁决。
+
+        但靠提示选出来的记录不得回填地理：那是循环论证，好的情况只是复述提示，
+        坏的情况（提示本身就错）会把错省份洗成确信字段、让消息发错大区。
+        名称与等级仍然可用，那才是这次匹配的增量。
+        """
+        without_hint = self.index.match(name="山东中医药大学附属眼科医院")
+        self.assertFalse(without_hint["matched"])
+        self.assertTrue(without_hint["ambiguous"])
+
+        right = self.index.match(name="山东中医药大学附属眼科医院", province="山东省")
+        self.assertTrue(right["matched"])
+        self.assertEqual(right["hospital_level"], "三级甲等")
+        self.assertFalse(right["geo_trusted"])
+
+        # 提示给错时也一样收敛，但同样禁止回填——不会把四川写进结果
+        wrong = self.index.match(name="山东中医药大学附属眼科医院", province="四川省")
+        self.assertTrue(wrong["matched"])
+        self.assertFalse(wrong["geo_trusted"])
+
+    def test_disambiguation_leaves_unambiguous_matches_alone(self):
+        """没有同名冲突的匹配不该被这套逻辑碰到。"""
+        for name in ("宾县人民医院", "宁夏回族自治区人民医院", "余姚市第二人民医院"):
+            with self.subTest(name=name):
+                match = self.index.match(name=name)
+                self.assertTrue(match["matched"])
+                self.assertFalse(match["geo_disambiguated"])
+                self.assertTrue(match["geo_trusted"])
 
 
 class GenericNameHijackTests(unittest.TestCase):

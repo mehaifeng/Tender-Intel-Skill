@@ -797,8 +797,10 @@ def canonicalize_create(row, candidate):
         # 拿它回填会把省份/地区/大区一路填错，直接发错人。名称和等级不受影响。
         geo_trusted = match.get("geo_trusted", True)
         if not geo_trusted:
-            add_adjustment(row, "医院索引地理", match.get("province"), "不采用",
-                           "索引地理与医院名地名矛盾，仅用其名称与等级")
+            reason = ("同名候选靠地理提示裁决，回填地理属循环论证，仅用其名称与等级"
+                      if match.get("geo_disambiguated")
+                      else "索引地理与医院名地名矛盾，仅用其名称与等级")
+            add_adjustment(row, "医院索引地理", match.get("province"), "不采用", reason)
         if geo_trusted:
             if record["所属省/市"] == "null" and match.get("province"):
                 record["所属省/市"] = canonical_province(match.get("province"), match.get("city"))
