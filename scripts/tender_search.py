@@ -66,29 +66,11 @@ def _plap_command(args, source_dir):
     return command
 
 
-def _hosp_command(args, source_dir):
-    command = [
-        sys.executable, str(SCRIPTS / "hosp_search.py"),
-        "--time-range", args.time_range,
-        "--out-dir", str(source_dir),
-        "--min-db", str(args.hosp_min_db),
-        "--min-target", str(args.hosp_min_target),
-    ]
-    if args.hosp_queries:
-        command.extend(["--queries", args.hosp_queries])
-    if args.hosp_limit_sites:
-        command.extend(["--limit-sites", str(args.hosp_limit_sites)])
-    if args.dry_run:
-        command.append("--dry-run")
-    return command
-
-
 # 新来源只需实现同一候选目录契约并在这里注册命令构造器。
 ADAPTERS = {
     "doubao": _doubao_command,
     "ccgp": _ccgp_command,
     "plap": _plap_command,
-    "hosp": _hosp_command,
 }
 DEFAULT_SOURCES = ",".join(ADAPTERS)
 
@@ -136,12 +118,6 @@ def main():
     parser.add_argument("--plap-delay", type=float, default=1.0)
     parser.add_argument("--plap-page-size", type=int, default=20)
     parser.add_argument("--plap-max-pages", type=int, default=100)
-    parser.add_argument("--hosp-queries", help="传给 HOSP 的逗号分隔宽词；默认 招标,试剂")
-    parser.add_argument("--hosp-min-db", type=int, default=1,
-                        help="医院域名最低豆包招采产出数；默认 1")
-    parser.add_argument("--hosp-min-target", type=int, default=0,
-                        help="医院域名最低检验类命中数；设 1 只打高相关站，省额度但会漏周期性买家")
-    parser.add_argument("--hosp-limit-sites", type=int, help="医院域名数上限，用于控成本")
     parser.add_argument("--no-stats", action="store_true", help="不更新豆包 query_stats")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
