@@ -28,10 +28,10 @@ class SearchMergeTests(unittest.TestCase):
         self.assertNotIn("channel", normalized)
         self.assertEqual(plap_notice_id(normalized), "8a1d04009fd98fe401a03138aab456cf")
 
-    def test_cross_source_duplicate_prefers_ccgp_and_keeps_doubao_attribution(self):
+    def test_cross_source_duplicate_prefers_ccgp_and_keeps_jrbx_attribution(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            doubao = root / "doubao"
+            jrbx = root / "jrbx"
             ccgp = root / "ccgp"
             write_candidates([{
                 "title": "某医院过敏原试剂公开招标公告",
@@ -41,10 +41,10 @@ class SearchMergeTests(unittest.TestCase):
                 "summary": "项目编号：ABC-2026-01",
                 "content": "项目编号：ABC-2026-01 采购方式：公开招标",
                 "found_by_query": [1, 3],
-                "found_by_source_query": [{"source": "doubao", "query_number": 1}],
-                "source": "doubao",
-                "sources": ["doubao"],
-            }], doubao, "2026-08-23")
+                "found_by_source_query": [{"source": "jrbx", "query_number": 1}],
+                "source": "jrbx",
+                "sources": ["jrbx"],
+            }], jrbx, "2026-08-23")
             write_candidates([{
                 "title": "某医院过敏原试剂公开招标公告",
                 "site_name": "中国政府采购网",
@@ -60,12 +60,12 @@ class SearchMergeTests(unittest.TestCase):
                 "retrieval_verified": True,
             }], ccgp, "2026-08-23")
 
-            merged = merge_source_dirs([doubao, ccgp])
+            merged = merge_source_dirs([jrbx, ccgp])
             self.assertEqual(len(merged), 1)
             self.assertEqual(merged[0]["source"], "ccgp")
             self.assertEqual(merged[0]["content"], "官方完整正文")
             self.assertEqual(merged[0]["found_by_query"], [1, 3])
-            self.assertEqual(set(merged[0]["sources"]), {"ccgp", "doubao"})
+            self.assertEqual(set(merged[0]["sources"]), {"ccgp", "jrbx"})
             self.assertEqual(len(merged[0]["alternate_sources"]), 1)
 
     def test_same_project_different_notice_stage_is_not_merged(self):
@@ -84,16 +84,16 @@ class SearchMergeTests(unittest.TestCase):
             }], second, "2026-08-23")
             self.assertEqual(len(merge_source_dirs([first, second])), 2)
 
-    def test_plap_official_candidate_wins_over_doubao_copy(self):
+    def test_plap_official_candidate_wins_over_jrbx_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            doubao = root / "doubao"
+            jrbx = root / "jrbx"
             plap = root / "plap"
             title = "某医院自身抗体试剂采购公告"
             write_candidates([{
-                "title": title, "url": "https://mirror.example/1", "source": "doubao",
+                "title": title, "url": "https://mirror.example/1", "source": "jrbx",
                 "summary": "转载摘要", "content": "转载正文", "retrieval_verified": False,
-            }], doubao, "2026-08-25")
+            }], jrbx, "2026-08-25")
             write_candidates([{
                 "title": title,
                 "url": "https://www.plap.mil.cn/freecms/site/juncai/ggxx/info/2026/8a1d04009fd98fe401a03138aab456cf.html",
@@ -101,7 +101,7 @@ class SearchMergeTests(unittest.TestCase):
                 "summary": "官方摘要", "content": "官方公开正文",
                 "retrieval_verified": True, "content_access": "public_partial",
             }], plap, "2026-08-25")
-            merged = merge_source_dirs([doubao, plap])
+            merged = merge_source_dirs([jrbx, plap])
             self.assertEqual(len(merged), 1)
             self.assertEqual(merged[0]["source"], "plap")
             self.assertEqual(merged[0]["content_access"], "public_partial")

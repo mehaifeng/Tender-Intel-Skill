@@ -7,7 +7,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from send_webhook import FIELDS, validate_payload  # noqa: E402
-from doubao_search import dedup_candidates  # noqa: E402
 from tender_pipeline import (  # noqa: E402
     extract_departments,
     matched_query_keywords,
@@ -45,24 +44,12 @@ class WebhookSchemaTests(unittest.TestCase):
         text = "项目使用科室：医学检验科\n拟采购过敏原检测试剂。"
         candidate = {
             "found_by_source_query": [
-                {"source": "doubao", "query_number": 1, "query": "过敏原检测 试剂 招标公告"},
+                {"source": "jrbx", "query_number": 1, "query": "过敏原检测 试剂 招标公告"},
                 {"source": "ccgp", "query": "过敏原"},
             ]
         }
         self.assertEqual(extract_departments(text), ["医学检验科"])
         self.assertEqual(matched_query_keywords(candidate, text), ["过敏原检测", "过敏原"])
-
-    def test_doubao_candidate_keeps_actual_query_text(self):
-        candidates = dedup_candidates([{
-            "num": 1,
-            "query": "过敏原检测 试剂 招标公告",
-            "results": [{"Url": "https://example.test/1", "Title": "过敏原检测采购"}],
-        }])
-        self.assertEqual(candidates[0]["found_by_source_query"], [{
-            "source": "doubao",
-            "query_number": 1,
-            "query": "过敏原检测 试剂 招标公告",
-        }])
 
 
 if __name__ == "__main__":

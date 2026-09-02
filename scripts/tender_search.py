@@ -19,21 +19,6 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 
 
-def _doubao_command(args, source_dir):
-    command = [
-        sys.executable, str(SCRIPTS / "doubao_search.py"),
-        "--time-range", args.time_range,
-        "--out-dir", str(source_dir),
-    ]
-    if args.doubao_queries:
-        command.extend(["--queries", args.doubao_queries])
-    if args.no_stats:
-        command.append("--no-stats")
-    if args.dry_run:
-        command.append("--dry-run")
-    return command
-
-
 def _ccgp_command(args, source_dir):
     command = [
         sys.executable, str(SCRIPTS / "ccgp_search.py"),
@@ -89,10 +74,6 @@ ADAPTERS = {
     "jrbx": _jrbx_command,
     "ccgp": _ccgp_command,
     "plap": _plap_command,
-    # 2026-09-02 起不再默认启用：睿销（jrbx）在同一批品类词上召回更强，
-    # 且返回结构化字段与官方回源链接。适配器保留，回滚用
-    # `--sources doubao,ccgp,plap` 即可，无需改代码。
-    "doubao": _doubao_command,
 }
 DEFAULT_SOURCES = "jrbx,ccgp,plap"
 
@@ -134,7 +115,6 @@ def main():
     )
     parser.add_argument("--time-range", default="72h", help="72h / 3d / YYYY-MM-DD..YYYY-MM-DD")
     parser.add_argument("--out-dir", help="统一候选目录；默认 .tmp/search/<日期>")
-    parser.add_argument("--doubao-queries", help="传给豆包适配器的编号表达式")
     parser.add_argument("--ccgp-queries", help="传给 CCGP 的逗号分隔单词 Query")
     parser.add_argument("--ccgp-delay", type=float, default=2.0)
     parser.add_argument("--ccgp-max-pages", type=int, default=100)
@@ -152,7 +132,6 @@ def main():
     parser.add_argument("--plap-delay", type=float, default=1.0)
     parser.add_argument("--plap-page-size", type=int, default=20)
     parser.add_argument("--plap-max-pages", type=int, default=100)
-    parser.add_argument("--no-stats", action="store_true", help="不更新豆包 query_stats")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 

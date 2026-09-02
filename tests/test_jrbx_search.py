@@ -119,7 +119,7 @@ class QueryTests(unittest.TestCase):
         queries = parse_queries()
         self.assertEqual(len(queries), 30)
         self.assertIn("过敏原", queries)
-        # 与豆包不同，睿销不禁止空格，但清单仍应是干净的单词或 AND 组词
+        # 睿销不禁止空格（旧豆包适配器禁止），但清单仍应是干净的单词或 AND 组词
         for query in queries:
             self.assertTrue(query.strip())
 

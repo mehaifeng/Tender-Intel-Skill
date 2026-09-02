@@ -559,7 +559,7 @@ def build_candidate(item, detail, origin_url, hits, all_terms):
         url = canonical_url(origin_url)
         site_name = urlsplit(url).netloc
         auth_info_des = "商业聚合库转载，链接已回源原始站点"
-        # 低于 CCGP/PLAP 官方一手（400），高于豆包泛搜（0）。
+        # 低于 CCGP/PLAP 官方一手（400），高于无归属的泛搜结果（0）。
         source_priority = 300
         link_kind = "origin"
     else:

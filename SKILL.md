@@ -147,6 +147,6 @@ Windows旧任务可继续使用字段与门禁一致的`scripts/send_webhook.ps1
 
 所有批次进入终态；所有推送载荷严格为固定15字段、单条、平铺、全字符串、无JSON null；成功回执已登记；摘要按来源披露检索失败，并披露跨来源重复、创建、排除、已有结论（`concluded`）、本地manual和推送成功数。
 
-修改品类词表本身时读取[关键词与Query](references/keywords.md)；修改睿销、CCGP 或 PLAP 的检索词与调用参数时分别读取对应适配器参考文件。[豆包适配器](references/doubao.md)与 keywords.md 中的 `Sites` 白名单、`Count`、`AuthInfoLevel` 等参数只适用于已停用的 doubao 适配器，回滚时才需要读取。
+修改品类词表本身时读取[关键词与Query](references/keywords.md)；修改睿销、CCGP 或 PLAP 的检索词与调用参数时分别读取对应适配器参考文件。keywords.md 中标注为豆包时期的 `Sites` 白名单、`Count`、`AuthInfoLevel` 等参数已随该适配器一并删除（2026-09-02），只作历史记录，不再有对应实现。
 
-睿销的 Query 支持 AND 组词（`过敏原+试剂` 会传 `["过敏原","试剂"]`），不受豆包「单个不含空格的词」限制；首次接入沿用 keywords.md §5 的 30 词以便同口径对比召回。
+睿销的 Query 支持 AND 组词（`过敏原+试剂` 会传 `["过敏原","试剂"]`），不受旧豆包适配器「单个不含空格的词」限制；接入时沿用 keywords.md §5 的 30 词以便同口径对比召回。

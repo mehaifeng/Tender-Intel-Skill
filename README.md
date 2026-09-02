@@ -5,7 +5,7 @@
 ## 处理流程
 
 ```text
-Doubao聚合站白名单检索 + CCGP官方HTTP检索 + PLAP匿名公开检索
+睿销（jrbx）聚合库检索 + CCGP官方HTTP检索 + PLAP匿名公开检索
   → 统一候选契约与跨来源查重
   → 标题与内容信号预筛
   → 每批10条快速核验（CCGP缺字段时可按需读取直链附件）
@@ -23,11 +23,11 @@ Doubao聚合站白名单检索 + CCGP官方HTTP检索 + PLAP匿名公开检索
 | `references/schema.md` | 固定15字段、医院匹配和大区规则 |
 | `references/verification.md` | 快速核验协议 |
 | `references/keywords.md` | 固定30条单词Query、品类词与边际贡献实测方法 |
-| `references/doubao.md` | 豆包调用约束：单词Query、Sites白名单、时间窗与权威度实测 |
+| `references/jrbx.md` | 睿销调用约束：登录态凭证、AND组词Query、回源URL配额 |
 | `references/ccgp.md` | CCGP单词Query、普通HTTP约束和来源优先级 |
 | `references/plap.md` | 军队采购网匿名公开检索、混合策略和正文降级规则 |
 | `scripts/tender_search.py` | 可插拔多来源统一检索入口 |
-| `scripts/doubao_search.py` | Doubao官方API检索 |
+| `scripts/jrbx_search.py` | 睿销聚合库检索与回源链接补全 |
 | `scripts/ccgp_search.py` | 中国政府采购网普通HTTP检索与详情字段提取 |
 | `scripts/plap_search.py` | 军队采购网匿名公开列表检索与部分正文提取 |
 | `scripts/search_common.py` | 统一候选契约、链接规范化与跨来源查重 |
@@ -39,9 +39,9 @@ Doubao聚合站白名单检索 + CCGP官方HTTP检索 + PLAP匿名公开检索
 
 ## 配置
 
-开箱包已经包含本地`config/doubao.json`和`config/webhook.json`，可以直接运行。两个文件含凭据，已被Git忽略，请勿公开分享。
+开箱包已经包含本地`config/webhook.json`，可以直接运行。该文件含凭据，已被Git忽略，请勿公开分享。
 
-如需覆盖配置，Doubao Key可使用环境变量`DOUBAO_SEARCH_API_KEY`。Webhook按环境变量`FEISHU_WEBHOOK_URL` → 旧环境变量`FEISHU_CREATE_WEBHOOK_URL` → `config/webhook.json`的顺序读取。
+睿销登录态只从环境变量`JRBX_USER_ID`、`JRBX_TOKEN`、`JRBX_OPENID`读取，不落盘到仓库。Webhook按环境变量`FEISHU_WEBHOOK_URL` → 旧环境变量`FEISHU_CREATE_WEBHOOK_URL` → `config/webhook.json`的顺序读取。
 
 ## 运行
 
@@ -51,7 +51,7 @@ Doubao聚合站白名单检索 + CCGP官方HTTP检索 + PLAP匿名公开检索
 python scripts/tender_search.py
 ```
 
-默认同时运行`doubao,ccgp,plap`。可用`--sources doubao`、`--sources ccgp`或`--sources plap`单独诊断某个适配器。CCGP不需要账号或浏览器；搜索页、完整详情正文和附件直链均由普通HTTP读取。
+默认同时运行`jrbx,ccgp,plap`。可用`--sources jrbx`、`--sources ccgp`或`--sources plap`单独诊断某个适配器。CCGP不需要账号或浏览器；搜索页、完整详情正文和附件直链均由普通HTTP读取。
 
 PLAP 默认启用，只读取军队采购网匿名公开信息，不登录，也不补全登录后字段。若详情页要求登录，适配器仍保留搜索结果中可见的标题、日期、公告类型和链接，并将正文访问状态标记为受限：
 

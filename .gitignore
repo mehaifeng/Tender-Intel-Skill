@@ -1,4 +1,5 @@
-# 豆包搜索直连配置含 API Key，禁止提交；参照 config/doubao.example.json 在本地创建
+# 含凭据，禁止提交
+# config/doubao.json 是已删除的豆包适配器遗留文件（2026-09-02），规则保留以防本地残留被误提交
 config/doubao.json
 config/webhook.json
 
