@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tender Intel 的轻量状态机、医院匹配与 Webhook 载荷门禁。
+"""IVD Bid Radar 的轻量状态机、医院匹配与 Webhook 载荷门禁。
 
 模型只处理 prepare 生成的小批次；脚本负责去重、保守预筛、医院库匹配、
 固定 15 字段归一化、载荷导出和成功回执登记。本脚本不发送网络请求。
@@ -1171,7 +1171,7 @@ def record_push(run_dir, receipt_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Tender Intel轻量状态机与Webhook门禁")
+    parser = argparse.ArgumentParser(description="IVD Bid Radar轻量状态机与Webhook门禁")
     sub = parser.add_subparsers(dest="command", required=True)
 
     prepare_parser = sub.add_parser("prepare", help="建立去重、预筛、医院匹配和小批次队列")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""豆包搜索 Custom 版直连调用器（替代第三方 MCP）——tender-intel 阶段 1。
+"""豆包搜索 Custom 版直连调用器（替代第三方 MCP）——ivd-bid-radar 阶段 1。
 
 相对第三方 MCP 补齐的能力：
   - TimeRange 闭区间（YYYY-MM-DD..YYYY-MM-DD），MCP 只有滚动窗口

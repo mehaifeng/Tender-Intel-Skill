@@ -1,4 +1,4 @@
-# Tender Intel Skill
+# IVD Bid Radar Skill
 
 面向过敏原、自身免疫IVD试剂和免疫分析仪器采购情报的无人值守管线：默认检索最近72小时，完成去重、快速网页核验、医院库匹配和固定15字段Webhook推送。
 

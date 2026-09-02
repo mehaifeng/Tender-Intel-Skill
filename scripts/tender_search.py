@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tender Intel 可插拔检索层：运行来源适配器并生成统一候选目录。"""
+"""IVD Bid Radar 可插拔检索层：运行来源适配器并生成统一候选目录。"""
 
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def main():
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(description="Tender Intel 可插拔多来源检索层")
+    parser = argparse.ArgumentParser(description="IVD Bid Radar 可插拔多来源检索层")
     parser.add_argument(
         "--sources",
         default=DEFAULT_SOURCES,

@@ -66,7 +66,7 @@ Webhook每次只接收一条记录，字段名和顺序固定。全部字段都�
 - 只接受名称或别名的确定性匹配；同名单位必须由省、市或区县消歧。
 - `explicit`（单位/医院全名精确命中）不再被 geo hint 硬否决：模型填的`地区`与索引行政区划不一致时（如`平坝区` vs 索引旧名`平坝县`），explicit 命中仍生效，同名消歧交给 grouped 阶段；`text` 来源的 geo 预过滤保持不变。
 - 索引未匹配先查索引是否收录（`python3 -c` 检索 `records` 的 `n`/`a` 字段），不要默认 null 合理；官方简称与索引名差后缀时（如`新疆医科大学第二附属医院` vs 索引`…七道湾医院`）给索引条目加`|`分隔别名并重建 gz（先备份）。
-- 技能与运行仓库是两份独立副本（`~/.hermes/skills/tender-intel/` 与 `~/sources/MySkills/Tender-Intel-Skill/`），改脚本/索引必须同步两处。
+- 技能与运行仓库是两份独立副本（`~/.hermes/skills/ivd-bid-radar/` 与 `~/sources/MySkills/IVD-Bid-Radar-Skill/`），改脚本/索引必须同步两处。
 - 数据库中的`未知`、`民营医院`等非等级值已清空；Webhook输出为`"null"`。
 
 ## 运行时证据

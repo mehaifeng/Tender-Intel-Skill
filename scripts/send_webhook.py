@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""校验并发送Tender Intel固定15字段Webhook载荷。"""
+"""校验并发送IVD Bid Radar固定15字段Webhook载荷。"""
 
 import argparse
 import hashlib
@@ -155,7 +155,7 @@ def validate_manifest(manifest_path, payload_path, payload_sha256):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="发送固定15字段Tender Intel Webhook载荷")
+    parser = argparse.ArgumentParser(description="发送固定15字段IVD Bid Radar Webhook载荷")
     parser.add_argument("--payload", required=True)
     parser.add_argument("--manifest")
     parser.add_argument("--webhook-url", help="仅DryRun可显式传入；Live使用环境变量或config/webhook.json")
