@@ -49,6 +49,24 @@ def _ccgp_command(args, source_dir):
     return command
 
 
+def _jrbx_command(args, source_dir):
+    command = [
+        sys.executable, str(SCRIPTS / "jrbx_search.py"),
+        "--time-range", args.time_range,
+        "--out-dir", str(source_dir),
+        "--delay", str(args.jrbx_delay),
+        "--page-size", str(args.jrbx_page_size),
+        "--max-pages-per-query", str(args.jrbx_max_pages),
+        "--max-origin-lookups", str(args.jrbx_max_origin_lookups),
+        "--notice-types", args.jrbx_notice_types,
+    ]
+    if args.jrbx_queries:
+        command.extend(["--queries", args.jrbx_queries])
+    if args.dry_run:
+        command.append("--dry-run")
+    return command
+
+
 def _plap_command(args, source_dir):
     command = [
         sys.executable, str(SCRIPTS / "plap_search.py"),
@@ -68,11 +86,18 @@ def _plap_command(args, source_dir):
 
 # 新来源只需实现同一候选目录契约并在这里注册命令构造器。
 ADAPTERS = {
-    "doubao": _doubao_command,
+    "jrbx": _jrbx_command,
     "ccgp": _ccgp_command,
     "plap": _plap_command,
+    # 2026-09-02 起不再默认启用：睿销（jrbx）在同一批品类词上召回更强，
+    # 且返回结构化字段与官方回源链接。适配器保留，回滚用
+    # `--sources doubao,ccgp,plap` 即可，无需改代码。
+    "doubao": _doubao_command,
 }
-DEFAULT_SOURCES = ",".join(ADAPTERS)
+DEFAULT_SOURCES = "jrbx,ccgp,plap"
+
+# 登录态失效必须与“今天没有新公告”区分开：jrbx_search.py 用退出码 3 表达。
+AUTH_ERROR_EXIT_CODE = 3
 
 
 def parse_sources(value):
@@ -113,6 +138,15 @@ def main():
     parser.add_argument("--ccgp-queries", help="传给 CCGP 的逗号分隔单词 Query")
     parser.add_argument("--ccgp-delay", type=float, default=2.0)
     parser.add_argument("--ccgp-max-pages", type=int, default=100)
+    parser.add_argument("--jrbx-queries", help="传给睿销的逗号分隔 Query；`A+B` 表示 AND")
+    parser.add_argument("--jrbx-delay", type=float, default=1.2)
+    parser.add_argument("--jrbx-page-size", type=int, default=100)
+    parser.add_argument("--jrbx-max-pages", type=int, default=20)
+    parser.add_argument(
+        "--jrbx-max-origin-lookups", type=int, default=10,
+        help="睿销回源URL调用上限；免费账号实测约10次/天",
+    )
+    parser.add_argument("--jrbx-notice-types", default="20100,20300,20400,20600")
     parser.add_argument("--plap-queries", help="传给 PLAP 的逗号分隔标题 Query")
     parser.add_argument("--plap-strategy", choices=("hybrid", "title", "enumerate"), default="hybrid")
     parser.add_argument("--plap-delay", type=float, default=1.0)
@@ -157,10 +191,19 @@ def main():
         usable = (source_dir / "candidate_index.jsonl").exists()
         if usable:
             usable_dirs.append(source_dir)
+        auth_error = completed.returncode == AUTH_ERROR_EXIT_CODE
+        if auth_error:
+            # 无人值守时这类失败最危险：它看起来像“今天没情报”，实际是凭证掉了。
+            print(
+                f"警告：来源 {source} 登录态失效，本次未产出任何候选；"
+                f"需要更新凭证后重跑，详见该来源的错误输出",
+                file=sys.stderr,
+            )
         runs.append({
             "source": source,
             "exit_code": completed.returncode,
             "usable": usable,
+            "auth_error": auth_error,
             "source_dir": str(source_dir),
             "summary": summary,
         })
@@ -184,6 +227,7 @@ def main():
         "source_count": len(runs),
         "source_succeeded": sum(1 for run in runs if run["exit_code"] == 0),
         "source_failed": sum(1 for run in runs if run["exit_code"] != 0),
+        "source_auth_failed": sorted(run["source"] for run in runs if run.get("auth_error")),
         "raw_result_count": sum(
             int((run.get("summary") or {}).get("raw_result_count") or 0) for run in runs
         ),
