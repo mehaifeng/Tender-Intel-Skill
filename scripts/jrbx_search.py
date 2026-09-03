@@ -38,6 +38,8 @@ from search_common import (
 ROOT = Path(__file__).resolve().parent.parent
 REFERENCE_FILE = ROOT / "references" / "jrbx.md"
 BASE_URL = "https://www.jrbx360.cn"
+CREDENTIALS_FILE = ROOT / "config" / "jrbx.json"
+
 WEB_ORIGIN = "https://www.jrbx.com"
 SEARCH_ENDPOINT = "/integrated-search/v1/search"
 DETAIL_ENDPOINT = "/integrated-search/v1/verify/noticeDetail"
@@ -124,20 +126,105 @@ def html_to_text(value):
     return "\n".join(line for line in lines if line)
 
 
-def load_credentials(env=None):
-    """凭证只从环境变量读取；不接受命令行明文，避免进入进程列表和 shell 历史。"""
+def _read_credentials_file(path=None):
+    """config/jrbx.json 的三字段；文件不存在或字段不全时返回 {}。"""
+    path = Path(path or CREDENTIALS_FILE)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise JrbxAuthError(f"{path} 不是合法 JSON：{exc}") from exc
+    got = {k: str(data.get(k) or "").strip() for k in ("userId", "token", "openid")}
+    return got if all(got.values()) else {}
+
+
+def load_credentials(env=None, path=None):
+    """环境变量优先，其次 config/jrbx.json。
+
+    该文件在 .gitignore 中，与 config/webhook.json 同等对待：**只允许留在本机**，
+    不得提交、不得进候选目录、日志或 Webhook 载荷。命令行仍然不接受凭证明文，
+    避免进入进程列表和 shell 历史。
+    """
     env = env if env is not None else os.environ
-    missing = [name for name in ("JRBX_USER_ID", "JRBX_TOKEN", "JRBX_OPENID") if not env.get(name)]
-    if missing:
+    names = ("JRBX_USER_ID", "JRBX_TOKEN", "JRBX_OPENID")
+    if all(env.get(name) for name in names):
+        return {
+            "userId": env["JRBX_USER_ID"].strip(),
+            "token": env["JRBX_TOKEN"].strip(),
+            "openid": env["JRBX_OPENID"].strip(),
+        }
+    from_file = _read_credentials_file(path)
+    if from_file:
+        return from_file
+    missing = [name for name in names if not env.get(name)]
+    raise JrbxAuthError(
+        "缺少睿销凭证：环境变量 " + "、".join(missing)
+        + f" 未设置，且 {CREDENTIALS_FILE} 不存在或字段不全"
+        + "；用 `python scripts/jrbx_search.py --set-token` 写入，取值方法见 references/jrbx.md「凭证」"
+    )
+
+
+def credentials_from_user_info(raw):
+    """从浏览器 IndexedDB 的 USER_INFO#1 整段 JSON 里解出三个字段。
+
+    该对象在不同版本里可能多包一层（`data` / `userInfo`），逐层找齐为止。
+    """
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError as exc:
+        raise JrbxAuthError(f"粘贴的内容不是合法 JSON：{exc}") from exc
+
+    def dig(node):
+        if isinstance(node, dict):
+            if node.get("userId") and (node.get("accessToken") or node.get("token")):
+                return node
+            for value in node.values():
+                found = dig(value)
+                if found:
+                    return found
+        elif isinstance(node, list):
+            for value in node:
+                found = dig(value)
+                if found:
+                    return found
+        return None
+
+    node = dig(data)
+    if not node:
         raise JrbxAuthError(
-            "缺少睿销凭证环境变量：" + "、".join(missing)
-            + "；取值方法见 references/jrbx.md「凭证」"
+            "在粘贴的 JSON 里找不到 userId / accessToken；"
+            "请确认拷的是 USER_INFO#1 的完整值（见 references/jrbx.md「凭证」）"
         )
-    return {
-        "userId": env["JRBX_USER_ID"].strip(),
-        "token": env["JRBX_TOKEN"].strip(),
-        "openid": env["JRBX_OPENID"].strip(),
+    creds = {
+        "userId": str(node.get("userId") or "").strip(),
+        "token": str(node.get("accessToken") or node.get("token") or "").strip(),
+        "openid": str(node.get("openid") or "").strip(),
     }
+    missing = [k for k, v in creds.items() if not v]
+    if missing:
+        raise JrbxAuthError("USER_INFO#1 里缺少字段：" + "、".join(missing))
+    return creds
+
+
+def write_credentials_file(credentials, path=None):
+    """写 config/jrbx.json，权限收到仅当前用户可读写。返回写入路径。"""
+    path = Path(path or CREDENTIALS_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "_说明": "睿销登录态。该文件已在 .gitignore 中，禁止提交或外发；"
+                 "环境变量 JRBX_USER_ID / JRBX_TOKEN / JRBX_OPENID 优先级更高。"
+                 "token 20 天固定窗口，过期只能微信重新扫码，用 --set-token 更新。",
+        "userId": credentials["userId"],
+        "token": credentials["token"],
+        "openid": credentials["openid"],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return path
 
 
 def token_expires_at(token):
@@ -728,12 +815,39 @@ def main():
     )
     parser.add_argument("--warn-days", type=int, default=3, help="--check-token 的到期告警阈值")
     parser.add_argument(
+        "--set-token", action="store_true",
+        help="从 stdin 读取浏览器 USER_INFO#1 的整段 JSON，解出三字段写入 config/jrbx.json",
+    )
+    parser.add_argument(
         "--offline", action="store_true",
         help="--check-token 时只解析 JWT 有效期，不发探测请求（查不出被顶号）",
     )
     args = parser.parse_args()
 
     try:
+        if args.set_token:
+            if sys.stdin.isatty():
+                print(
+                    "请粘贴浏览器 USER_INFO#1 的整段 JSON，粘完按 Ctrl+Z 回车（Windows）"
+                    "或 Ctrl+D（macOS/Linux）：",
+                    file=sys.stderr,
+                )
+            credentials = credentials_from_user_info(sys.stdin.read())
+            path = write_credentials_file(credentials)
+            expires = token_expires_at(credentials["token"])
+            report = {
+                "written": str(path),
+                "userId": credentials["userId"][:4] + "…",
+                "expires_at": expires.isoformat(timespec="seconds") if expires else None,
+                "days_left": (expires - datetime.now()).days if expires else None,
+            }
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            print(
+                f"已写入 {path}（该文件在 .gitignore 中，禁止提交或外发）",
+                file=sys.stderr,
+            )
+            return 0
+
         if args.check_token:
             report = check_token(
                 load_credentials(), warn_days=args.warn_days, probe=not args.offline

@@ -2,6 +2,7 @@
 # config/doubao.json 是已删除的豆包适配器遗留文件（2026-09-02），规则保留以防本地残留被误提交
 config/doubao.json
 config/webhook.json
+config/jrbx.json
 
 # 可分发包内含本地凭据，只保留在本机，不提交版本库
 dist/

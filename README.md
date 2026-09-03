@@ -27,7 +27,7 @@
 | `references/ccgp.md` | CCGP单词Query、普通HTTP约束和来源优先级 |
 | `references/plap.md` | 军队采购网匿名公开检索、混合策略和正文降级规则 |
 | `scripts/tender_search.py` | 可插拔多来源统一检索入口 |
-| `scripts/jrbx_search.py` | 睿销聚合库检索与回源链接补全 |
+| `scripts/jrbx_search.py` | 睿销聚合库检索、回源链接补全与凭证维护 |
 | `scripts/ccgp_search.py` | 中国政府采购网普通HTTP检索与详情字段提取 |
 | `scripts/plap_search.py` | 军队采购网匿名公开列表检索与部分正文提取 |
 | `scripts/search_common.py` | 统一候选契约、链接规范化与跨来源查重 |
@@ -41,7 +41,7 @@
 
 开箱包已经包含本地`config/webhook.json`，可以直接运行。该文件含凭据，已被Git忽略，请勿公开分享。
 
-睿销登录态只从环境变量`JRBX_USER_ID`、`JRBX_TOKEN`、`JRBX_OPENID`读取，不落盘到仓库。Webhook按环境变量`FEISHU_WEBHOOK_URL` → 旧环境变量`FEISHU_CREATE_WEBHOOK_URL` → `config/webhook.json`的顺序读取。
+睿销登录态按环境变量`JRBX_USER_ID`、`JRBX_TOKEN`、`JRBX_OPENID` → `config/jrbx.json`的顺序读取；后者用`python scripts/jrbx_search.py --set-token`写入，已被Git忽略。token有效期20天，过期需微信重新扫码，用`--check-token`查剩余天数。Webhook按环境变量`FEISHU_WEBHOOK_URL` → 旧环境变量`FEISHU_CREATE_WEBHOOK_URL` → `config/webhook.json`的顺序读取。
 
 ## 运行
 

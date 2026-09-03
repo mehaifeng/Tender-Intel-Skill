@@ -1,4 +1,7 @@
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,6 +19,7 @@ from jrbx_search import (  # noqa: E402
     check_token,
     build_candidate,
     collect,
+    credentials_from_user_info,
     load_credentials,
     parse_queries,
     parse_time_range,
@@ -23,6 +27,7 @@ from jrbx_search import (  # noqa: E402
     split_terms,
     to_millis,
     token_expires_at,
+    write_credentials_file,
 )
 
 
@@ -142,8 +147,63 @@ class QueryTests(unittest.TestCase):
 
 class CredentialTests(unittest.TestCase):
     def test_missing_credentials_raise_auth_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(JrbxAuthError):
+                load_credentials({"JRBX_USER_ID": "U1"}, path=Path(root) / "absent.json")
+
+    def test_environment_wins_over_the_config_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "jrbx.json"
+            write_credentials_file({"userId": "F1", "token": "F2", "openid": "F3"}, path)
+            env = {"JRBX_USER_ID": "E1", "JRBX_TOKEN": "E2", "JRBX_OPENID": "E3"}
+            self.assertEqual(
+                load_credentials(env, path=path),
+                {"userId": "E1", "token": "E2", "openid": "E3"},
+            )
+
+    def test_config_file_is_used_when_environment_is_empty(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "jrbx.json"
+            written = write_credentials_file({"userId": "F1", "token": "F2", "openid": "F3"}, path)
+            self.assertEqual(written, path)
+            self.assertEqual(
+                load_credentials({}, path=path),
+                {"userId": "F1", "token": "F2", "openid": "F3"},
+            )
+
+    def test_partial_config_file_is_ignored(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "jrbx.json"
+            path.write_text('{"userId": "F1", "token": ""}', encoding="utf-8")
+            with self.assertRaises(JrbxAuthError):
+                load_credentials({}, path=path)
+
+    def test_user_info_blob_is_dug_out_of_any_nesting(self):
+        # 浏览器里 USER_INFO#1 在不同版本里可能多包一层 data / userInfo
+        blob = json.dumps({"code": "00", "data": {"userInfo": {
+            "userId": "U1", "accessToken": "T1", "openid": "O1", "nickName": "张三"}}})
+        self.assertEqual(
+            credentials_from_user_info(blob),
+            {"userId": "U1", "token": "T1", "openid": "O1"},
+        )
+        self.assertEqual(
+            credentials_from_user_info('{"userId":"U1","token":"T1","openid":"O1"}'),
+            {"userId": "U1", "token": "T1", "openid": "O1"},
+        )
+
+    def test_user_info_without_token_is_rejected(self):
         with self.assertRaises(JrbxAuthError):
-            load_credentials({"JRBX_USER_ID": "U1"})
+            credentials_from_user_info('{"nickName": "张三"}')
+        with self.assertRaises(JrbxAuthError):
+            credentials_from_user_info("not json")
+
+    def test_written_file_never_carries_the_credentials_into_the_repo(self):
+        # config/jrbx.json 必须处在 .gitignore 覆盖内
+        ignored = subprocess.run(
+            ["git", "check-ignore", "config/jrbx.json"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        self.assertEqual(ignored.returncode, 0, "config/jrbx.json 未被 .gitignore 覆盖")
 
     def test_credentials_map_access_token_to_body_key_token(self):
         loaded = load_credentials(

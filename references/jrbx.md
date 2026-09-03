@@ -26,6 +26,26 @@ CCGP 和 PLAP 是官方一手站点，匿名可访问；睿销是**需要账号�
 
 `accessToken` 是 JWT，实测有效期 **20 天固定窗口**（`iat`→`exp`），每天调用不会顺延。
 
+### 写入与读取顺序
+
+```
+python scripts/jrbx_search.py --set-token
+```
+
+粘贴上面控制台语句打印出的整段 JSON，Ctrl+Z 回车（Windows）／Ctrl+D（macOS/Linux）结束。
+脚本自己从任意嵌套层级里挖出 `userId`／`accessToken`／`openid`，写进 `config/jrbx.json`
+（权限收到 `0600`），并直接打印到期日与剩余天数。
+
+读取顺序：**三个环境变量全齐时优先用环境变量；否则回退 `config/jrbx.json`。**
+两者都没有才报错。命令行**始终不接受**凭证明文——避免进入进程列表和 shell 历史。
+
+`config/jrbx.json` 与 `config/webhook.json` 同等对待：在 `.gitignore` 中，
+**只允许留在本机**，禁止提交、外发，也不得进候选目录、日志或 Webhook 载荷。
+模板见 `config/jrbx.example.json`。
+
+定时任务两种装法都行——服务账号跑就设用户级环境变量，本机跑就用配置文件，
+不必两边都配。
+
 ## token 维护
 
 睿销**没有 refresh／续期接口**。前端只有三个登录相关接口：`/cs/wx/v1/loginQrCode`

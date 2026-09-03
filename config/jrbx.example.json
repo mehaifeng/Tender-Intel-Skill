@@ -1,0 +1,8 @@
+{
+  "_说明": "复制为 config/jrbx.json 并填入睿销登录态，或直接用 `python scripts/jrbx_search.py --set-token` 从浏览器 USER_INFO#1 自动写入。该文件已在 .gitignore 中，不会被提交。环境变量 JRBX_USER_ID / JRBX_TOKEN / JRBX_OPENID 优先级更高。",
+  "_取值": "微信扫码登录 https://www.jrbx.com 后，浏览器控制台执行 references/jrbx.md「凭证」节给出的 IndexedDB 读取语句，拿到 USER_INFO#1 的值。",
+  "_有效期": "token 是 JWT，20 天固定窗口，每天调用不顺延；睿销没有 refresh 接口，过期只能微信重新扫码。用 --check-token 查剩余天数。",
+  "userId": "USER_INFO#1 的 userId",
+  "token": "USER_INFO#1 的 accessToken",
+  "openid": "USER_INFO#1 的 openid"
+}
