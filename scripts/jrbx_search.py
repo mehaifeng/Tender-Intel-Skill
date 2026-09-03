@@ -29,6 +29,7 @@ from search_common import (
     canonical_url,
     compact_text,
     extract_project_id,
+    excluded_domain_term,
     target_category_signals,
     write_candidates,
 )
@@ -69,11 +70,6 @@ NOT_FOUND_CODE = "04"
 QUOTA_CODE = "07"
 RATE_LIMIT_CODE = "1403"
 
-# 与 plap_search.py 保持同一口径（keywords.md §10.1）
-EXCLUDE_TERMS = re.compile(
-    r"酶标仪|电泳|兽医|兽用|畜牧|生猪|结核|干扰素释放|免疫组化|重组蛋白|培养基|缓冲液|核酸|PCR|测序",
-    re.I,
-)
 SHORT_TO_FULL_PROVINCE = {
     "北京": "北京市", "天津": "天津市", "上海": "上海市", "重庆": "重庆市",
     "河北": "河北省", "山西": "山西省", "辽宁": "辽宁省", "吉林": "吉林省",
@@ -464,7 +460,7 @@ def passes_prefilter(item, detail=None):
         html_to_text(detail.get("simpleContent")),
         html_to_text(detail.get("content")),
     ))
-    if EXCLUDE_TERMS.search(text):
+    if excluded_domain_term(text):
         return False
     return bool(target_category_signals(text))
 

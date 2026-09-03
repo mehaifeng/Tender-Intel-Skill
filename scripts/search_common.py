@@ -32,11 +32,7 @@ TARGET_CATEGORY_PATTERNS = [
         re.I,
     )),
     ("酶联免疫", re.compile(r"酶联免疫|\bELISA\b", re.I)),
-    ("化学发光免疫", re.compile(
-        r"化学发光.{0,8}(?:免疫|分析仪|分析系统|试剂|检测)|"
-        r"(?:免疫|分析仪|分析系统|试剂|检测).{0,8}化学发光|发光免疫",
-        re.I,
-    )),
+    # 化学发光 2026-09-03 从正向信号移到 EXCLUDE_TERMS 硬排除（keywords.md §10.1）。
     ("免疫荧光/免疫印迹", re.compile(r"免疫荧光|免疫印迹|免疫印迹仪", re.I)),
     ("免疫质控/校准", re.compile(r"免疫.{0,8}(?:质控品|校准品)|(?:质控品|校准品).{0,8}免疫", re.I)),
     # 酶标仪 2026-08-27 移除：业务方确认公司不做该品类（keywords.md §10.1），
@@ -44,6 +40,21 @@ TARGET_CATEGORY_PATTERNS = [
     # 「酶免仪+酶标仪+洗板机」这类混合包仍可靠酶免仪命中。
     ("免疫分析仪器", re.compile(r"免疫分析仪|全自动酶免|酶免工作站|酶免仪|洗板机", re.I)),
 ]
+
+# 非本司产品域，命中即判无关，**优先级高于 TARGET_CATEGORY_PATTERNS**（keywords.md §10.1）。
+# 2026-09-03 起为三个来源共用的唯一定义：此前 jrbx_search.py 与 plap_search.py 各存
+# 一份副本靠注释保持同步，CCGP 候选则完全没有产品域硬排除。
+EXCLUDE_TERMS = re.compile(
+    r"化学发光|发光免疫|"
+    r"酶标仪|电泳|兽医|兽用|畜牧|生猪|结核|干扰素释放|免疫组化|重组蛋白|培养基|缓冲液|核酸|PCR|测序",
+    re.I,
+)
+
+
+def excluded_domain_term(text):
+    """命中的硬排除词；未命中返回空串。用于把排除理由写进 skip_reason。"""
+    match = EXCLUDE_TERMS.search(text or "")
+    return match.group(0) if match else ""
 
 
 def compact_text(value, limit=None):

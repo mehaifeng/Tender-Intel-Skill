@@ -7,8 +7,44 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from search_common import canonical_url, merge_source_dirs, plap_notice_id, write_candidates  # noqa: E402
+from search_common import (  # noqa: E402
+    canonical_url,
+    excluded_domain_term,
+    merge_source_dirs,
+    plap_notice_id,
+    target_category_signals,
+    write_candidates,
+)
 from tender_pipeline import canonicalize_create, historical_identity_keys  # noqa: E402
+
+
+class ProductDomainScreenTests(unittest.TestCase):
+    """三个来源共用同一份硬排除（2026-09-03 起定义在 search_common）。"""
+
+    def test_chemiluminescence_is_hard_excluded(self):
+        for text in (
+            "某医院全自动化学发光免疫分析仪采购项目",
+            "自身抗体检测试剂（化学发光法）公开招标",
+            "磁微粒发光免疫分析系统采购",
+        ):
+            self.assertTrue(excluded_domain_term(text), text)
+
+    def test_chemiluminescence_is_no_longer_its_own_positive_signal(self):
+        # 「化学发光免疫」这条信号已删；仪器整机仍会命中「免疫分析仪器」，但硬排除
+        # 在所有调用点都跑在信号之前，所以命中与否不影响去留。
+        self.assertNotIn("化学发光免疫", target_category_signals("全自动化学发光免疫分析仪"))
+        self.assertNotIn("化学发光免疫", target_category_signals("自身抗体化学发光检测试剂"))
+
+    def test_core_product_domain_still_passes(self):
+        for text in ("过敏原特异性IgE检测试剂采购", "抗核抗体检测试剂招标",
+                     "酶联免疫检测试剂采购", "全自动酶免仪及配套试剂"):
+            self.assertFalse(excluded_domain_term(text), text)
+            self.assertTrue(target_category_signals(text), text)
+
+    def test_out_of_domain_terms_stay_excluded(self):
+        for text in ("酶标仪采购", "兽用检测试剂", "新冠核酸PCR检测试剂",
+                     "全自动电泳仪", "免疫组化二抗"):
+            self.assertTrue(excluded_domain_term(text), text)
 
 
 class SearchMergeTests(unittest.TestCase):

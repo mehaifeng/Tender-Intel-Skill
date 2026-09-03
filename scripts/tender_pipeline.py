@@ -22,6 +22,7 @@ from search_common import (
     ccgp_article_id,
     notice_family,
     plap_notice_id,
+    excluded_domain_term,
     target_category_signals,
     title_fingerprint as common_title_fingerprint,
 )
@@ -486,6 +487,12 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
         content_path, content = load_candidate_content(item, search_dir)
         summary = compact_text(content.get("summary"), limit=2000)
         search_text = "\n".join((item.get("title", ""), content.get("summary", ""), content.get("content", "")))
+        # 统一层兜底：适配器各自的硬排除只覆盖 jrbx 与 PLAP，CCGP 候选到这里才第一次
+        # 过产品域排除。放在品类信号之前——排除优先级高于信号（keywords.md §10.1）。
+        excluded = excluded_domain_term(search_text)
+        if excluded:
+            screened_out.append({**item, "skip_reason": f"命中非本司产品域硬排除词：{excluded}"})
+            continue
         signals = target_category_signals(search_text)
         if not signals:
             screened_out.append({**item, "skip_reason": "标题、摘要和搜索正文均无目标品类信号"})

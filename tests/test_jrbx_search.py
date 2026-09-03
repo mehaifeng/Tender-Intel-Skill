@@ -117,11 +117,27 @@ class QueryTests(unittest.TestCase):
 
     def test_default_queries_come_from_the_reference_file(self):
         queries = parse_queries()
-        self.assertEqual(len(queries), 30)
         self.assertIn("过敏原", queries)
         # 睿销不禁止空格（旧豆包适配器禁止），但清单仍应是干净的单词或 AND 组词
         for query in queries:
             self.assertTrue(query.strip())
+            self.assertNotIn(" ", query)
+
+    def test_bare_generic_reagent_words_are_not_in_the_list(self):
+        # 2026-09-03 裁撤：睿销是库内全文检索，裸「试剂」类词把 92% 的召回交给预筛去扔。
+        # 意图闸门改由 AND 组词承担（references/jrbx.md「默认 Query」）。
+        queries = parse_queries()
+        for banned in ("试剂", "检测试剂", "检验试剂", "检验科试剂",
+                       "体外诊断试剂", "免疫试剂", "抗体检测试剂", "单项定量检测"):
+            self.assertNotIn(banned, queries)
+        self.assertTrue([q for q in queries if "+" in q], "应保留 AND 组词承担宽召回")
+
+    def test_chemiluminescence_and_plate_reader_instruments_are_gone(self):
+        # 化学发光改为硬排除（keywords.md §10.1）；酶免整机不是本司生意，只留方法学词。
+        queries = parse_queries()
+        for banned in ("化学发光免疫分析仪", "酶联免疫分析仪", "全自动酶免仪"):
+            self.assertNotIn(banned, queries)
+        self.assertIn("酶免", queries)
 
 
 class CredentialTests(unittest.TestCase):

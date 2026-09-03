@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import collections
 import math
 import re
 import sys
@@ -23,7 +24,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 
-from search_common import canonical_url, compact_text, target_category_signals, write_candidates
+from search_common import (
+    canonical_url,
+    compact_text,
+    excluded_domain_term,
+    target_category_signals,
+    write_candidates,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,7 +87,6 @@ TARGET_TERMS = [
     ("细胞因子", re.compile(r"细胞因子", re.I)),
     ("IgG亚类", re.compile(r"IgG\s*亚类", re.I)),
     ("酶联免疫", re.compile(r"酶联免疫|\bELISA\b", re.I)),
-    ("化学发光", re.compile(r"化学发光|发光免疫", re.I)),
     ("免疫荧光", re.compile(r"免疫荧光", re.I)),
     ("免疫印迹", re.compile(r"免疫印迹", re.I)),
     ("免疫分析仪", re.compile(r"免疫分析仪", re.I)),
@@ -91,11 +97,6 @@ TARGET_TERMS = [
     ("检验设备", re.compile(r"检验设备|生化免疫", re.I)),
 ]
 
-# 明确不属于本司产品域，命中即判无关，优先级高于 TARGET_TERMS（keywords.md §10.1）
-EXCLUDE_TERMS = re.compile(
-    r"酶标仪|电泳|兽医|兽用|畜牧|生猪|结核|干扰素释放|免疫组化|重组蛋白|培养基|缓冲液|核酸|PCR|测序",
-    re.I,
-)
 PROVINCE_SHORT = {
     "北京市": "北京", "天津市": "天津", "上海市": "上海", "重庆市": "重庆",
     "河北省": "河北", "山西省": "山西", "辽宁省": "辽宁", "吉林省": "吉林",
@@ -263,7 +264,7 @@ def notice_type_name(code):
 def matched_target_terms(text):
     """命中的目标品类词。硬排除优先——即使同时含目标信号也返回空。"""
     text = text or ""
-    if EXCLUDE_TERMS.search(text):
+    if excluded_domain_term(text):
         return []
     return [name for name, pattern in TARGET_TERMS if pattern.search(text)]
 
@@ -363,16 +364,42 @@ def normalize_attachments(value):
     return rows
 
 
+def row_search_text(row):
+    """标题 + 公开摘要 + 公开正文；PLAP 常常只有标题，摘要为空时用正文截断兜底。"""
+    title = compact_text(row.get("title"))
+    summary = html_to_text(row.get("description"))
+    content = html_to_text(row.get("content"))
+    if not summary and content:
+        summary = compact_text(content, 2000)
+    return "\n".join((title, summary, content))
+
+
+def screen_row(row):
+    """(是否保留, 丢弃原因)。与 row_to_candidate 同源，供 collect 统计丢弃构成。
+
+    PLAP 只能按标题检索，词表必须宽，因此这一层的丢弃率天然很高。把丢弃原因分开
+    计数，才能判断某个宽词是在贡献召回还是纯粹在刷量。
+    """
+    text = row_search_text(row)
+    excluded = excluded_domain_term(text)
+    if excluded:
+        return False, f"硬排除:{excluded}"
+    if not target_category_signals(text):
+        return False, "无目标品类信号"
+    return True, ""
+
+
 def row_to_candidate(row, hits):
     title = compact_text(row.get("title"))
     summary = html_to_text(row.get("description"))
     content = html_to_text(row.get("content"))
     if not summary and content:
         summary = compact_text(content, 2000)
-    search_text = "\n".join((title, summary, content))
-    signals = target_category_signals(search_text)
-    if not signals:
+    search_text = row_search_text(row)
+    keep, _ = screen_row(row)
+    if not keep:
         return None
+    signals = target_category_signals(search_text)
 
     source_hits = list(hits)
     for term in matched_target_terms(search_text):
@@ -499,13 +526,25 @@ def collect(client, tasks, start, end, page_size=20, max_pages_per_task=100):
 
     candidates = []
     filtered_out = 0
+    screen_reasons = collections.Counter()
+    query_raw = collections.Counter()
+    query_kept = collections.Counter()
     for item in by_notice.values():
+        queries = [hit["query"] for hit in item["hits"]]
+        query_raw.update(set(queries))
         candidate = row_to_candidate(item["row"], item["hits"])
         if candidate:
             candidates.append(candidate)
+            query_kept.update(set(queries))
         else:
             filtered_out += 1
-    return candidates, failures, raw_count, filtered_out
+            screen_reasons[screen_row(item["row"])[1]] += 1
+    # 逐词存活率：PLAP 的宽词只有在这张表上才能被判断该留该裁。
+    query_survival = {
+        query: {"raw": count, "kept": query_kept.get(query, 0)}
+        for query, count in query_raw.most_common()
+    }
+    return candidates, failures, raw_count, filtered_out, dict(screen_reasons), query_survival
 
 
 def main():
@@ -554,7 +593,7 @@ def main():
         out_dir = Path(args.out_dir) if args.out_dir else ROOT / ".tmp" / "search" / date.today().isoformat() / ".sources" / "plap"
         out_dir.mkdir(parents=True, exist_ok=True)
         started = time.time()
-        candidates, failures, raw_count, filtered_out = collect(
+        candidates, failures, raw_count, filtered_out, screen_reasons, query_survival = collect(
             PLAPClient(delay=args.delay), tasks, start, end, args.page_size, args.max_pages_per_task
         )
         index = write_candidates(candidates, out_dir, date.today().isoformat())
@@ -568,6 +607,8 @@ def main():
             "query_failed": len(failures),
             "raw_result_count": raw_count,
             "prefilter_excluded": filtered_out,
+            "prefilter_excluded_by_reason": screen_reasons,
+            "query_survival": query_survival,
             "candidate_count": len(index),
             "content_access": {
                 "public_partial": sum(1 for item in index if item.get("content_access") == "public_partial"),
