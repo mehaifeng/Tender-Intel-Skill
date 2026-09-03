@@ -25,14 +25,16 @@ from tender_pipeline import canonical_province, normalize_region_location  # noq
 
 class CategorySignalTests(unittest.TestCase):
     def test_enzyme_plate_reader_is_not_a_positive_signal(self):
-        """酶标仪是业务方确认不做的品类（keywords.md §10.1），不能当命中理由。"""
+        """酶标仪不在两张关键词表里，也在排除词里，不能当命中理由。"""
         self.assertEqual(target_category_signals("某医院全自动酶标仪采购项目公开招标公告"), [])
 
-    def test_mixed_bundle_still_matches_on_a_real_target(self):
-        """只把酶标仪从信号里摘掉，不做硬排除——混合包里的酶免仪仍要能命中。"""
+    def test_instrument_bundle_matches_only_on_a_table_item(self):
+        """仪器词一律不算命中；同一个包里出现表内项目才留下。"""
+        self.assertEqual(
+            target_category_signals("某医院全自动酶免仪、酶标仪及洗板机采购项目"), [])
         self.assertIn(
-            "免疫分析仪器",
-            target_category_signals("某医院全自动酶免仪、酶标仪及洗板机采购项目"),
+            "核抗体谱",
+            target_category_signals("某医院免疫分析仪及抗核抗体谱检测试剂采购项目"),
         )
 
 

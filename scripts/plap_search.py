@@ -28,13 +28,14 @@ from search_common import (
     canonical_url,
     compact_text,
     excluded_domain_term,
+    extract_project_id,
     target_category_signals,
     write_candidates,
 )
 
 
 ROOT = Path(__file__).resolve().parent.parent
-REFERENCE_FILE = ROOT / "references" / "plap.md"
+REFERENCE_FILE = ROOT / "references" / "keywords.md"
 BASE_URL = "https://www.plap.mil.cn"
 SEARCH_PAGE = BASE_URL + "/freecms/site/juncai/qwjsy/index.html"
 SEARCH_ENDPOINT = BASE_URL + "/freecms/rest/v1/notice/selectInfoMoreChannel.do"
@@ -68,34 +69,9 @@ NOTICE_TYPE_PREFIXES = [
     ("00106B", "采购结果公示"),
     ("001006", "采购结果公示"),
 ]
-TARGET_TERMS = [
-    ("过敏原", re.compile(r"过敏原", re.I)),
-    ("过敏源", re.compile(r"过敏源", re.I)),
-    ("变应原", re.compile(r"变应原", re.I)),
-    ("特异性IgE", re.compile(r"特异性\s*IgE", re.I)),
-    ("sIgE", re.compile(r"\bsIgE\b", re.I)),
-    ("总IgE", re.compile(r"总\s*IgE|\btIgE\b", re.I)),
-    ("自身抗体", re.compile(r"自身抗体", re.I)),
-    ("自身免疫", re.compile(r"自身免疫", re.I)),
-    ("抗核抗体", re.compile(r"抗核抗体|\bANA\b", re.I)),
-    ("双链DNA", re.compile(r"双链\s*DNA|\bdsDNA\b", re.I)),
-    ("ANCA", re.compile(r"\bANCA\b", re.I)),
-    ("抗磷脂抗体", re.compile(r"抗磷脂抗体|心磷脂抗体", re.I)),
-    ("自免肝", re.compile(r"自免肝", re.I)),
-    ("肌炎抗体", re.compile(r"肌炎抗体", re.I)),
-    ("PLA2R", re.compile(r"\bPLA2R\b", re.I)),
-    ("细胞因子", re.compile(r"细胞因子", re.I)),
-    ("IgG亚类", re.compile(r"IgG\s*亚类", re.I)),
-    ("酶联免疫", re.compile(r"酶联免疫|\bELISA\b", re.I)),
-    ("免疫荧光", re.compile(r"免疫荧光", re.I)),
-    ("免疫印迹", re.compile(r"免疫印迹", re.I)),
-    ("免疫分析仪", re.compile(r"免疫分析仪", re.I)),
-    ("酶免仪", re.compile(r"全自动酶免|酶免工作站|酶免仪", re.I)),
-    # 2026-08-26 与 CCGP 词表双向对齐（见 references/ccgp.md「默认单词 Query」）。
-    # 移除 酶标仪 / 洗板机：业务方确认公司不做此品类（keywords.md §10.1）。
-    ("检验试剂", re.compile(r"检验试剂|试剂耗材|体外诊断试剂", re.I)),
-    ("检验设备", re.compile(r"检验设备|生化免疫", re.I)),
-]
+# TARGET_TERMS 2026-09-03 删除。它是 search_common.TARGET_CATEGORY_PATTERNS 的第二份
+# 副本，靠注释与 CCGP 词表手工对齐，随新版《过敏》《自免》词表重写会立刻再次漂移。
+# 本文件现在只用共用的 target_category_signals()：去留与归因同源，改词只需改一处。
 
 PROVINCE_SHORT = {
     "北京市": "北京", "天津市": "天津", "上海市": "上海", "重庆市": "重庆",
@@ -150,7 +126,7 @@ def html_to_text(value):
 
 def parse_title_queries():
     text = REFERENCE_FILE.read_text(encoding="utf-8")
-    marker = "## 默认标题 Query"
+    marker = "## PLAP 标题 Query"
     if marker not in text:
         raise PLAPError(f"{REFERENCE_FILE} 缺少“{marker}”")
     section = text.split(marker, 1)[1].split("\n## ", 1)[0]
@@ -262,11 +238,11 @@ def notice_type_name(code):
 
 
 def matched_target_terms(text):
-    """命中的目标品类词。硬排除优先——即使同时含目标信号也返回空。"""
+    """命中的共用目标品类信号。硬排除优先——即使同时含目标信号也返回空。"""
     text = text or ""
     if excluded_domain_term(text):
         return []
-    return [name for name, pattern in TARGET_TERMS if pattern.search(text)]
+    return target_category_signals(text)
 
 
 def province_short(region):
@@ -421,6 +397,11 @@ def row_to_candidate(row, hits):
     if project_id:
         fields["项目编号"] = project_id
         evidence["项目编号"] = f"公开列表项目编号：{project_id}"
+    else:
+        project_id = extract_project_id(search_text)
+        if project_id:
+            fields["项目编号"] = project_id
+            evidence["项目编号"] = f"公开正文项目编号：{project_id}"
     publish_time = compact_text(row.get("noticeTime"))
     if publish_time:
         fields["发布时间"] = publish_time

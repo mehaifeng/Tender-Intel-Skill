@@ -1,4 +1,4 @@
-# 发送一条固定15字段平铺JSON到飞书Webhook。
+﻿# 发送一条固定16字段平铺JSON到飞书Webhook。
 # DryRun只校验；生产必须显式-Live并由manifest授权。
 param(
     [Parameter(Mandatory=$true)]
@@ -30,7 +30,7 @@ if ($obj -is [System.Object[]]) {
 }
 
 $expectedFields = @(
-    "标题", "单位", "地区", "所属省/市", "所属大区", "发布时间", "截止时间",
+    "标题", "项目编号", "单位", "地区", "所属省/市", "所属大区", "发布时间", "截止时间",
     "预算", "采购方式", "科室", "命中关键词", "内容（检索的摘要）", "链接",
     "医院全名", "医院等级"
 )
@@ -119,7 +119,7 @@ if ($DryRun) {
     Write-Output ("  字节数 : " + $bytes.Length)
     Write-Output ("  字段数 : " + @($obj.PSObject.Properties).Count)
     Write-Output $json
-    Write-Output "校验通过：固定15字段、单条、平铺、全字符串、无JSON null"
+    Write-Output "校验通过：固定16字段、单条、平铺、全字符串、无JSON null"
     exit 0
 }
 

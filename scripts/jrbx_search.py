@@ -36,7 +36,7 @@ from search_common import (
 
 
 ROOT = Path(__file__).resolve().parent.parent
-REFERENCE_FILE = ROOT / "references" / "jrbx.md"
+REFERENCE_FILE = ROOT / "references" / "keywords.md"
 BASE_URL = "https://www.jrbx360.cn"
 CREDENTIALS_FILE = ROOT / "config" / "jrbx.json"
 
@@ -310,9 +310,63 @@ CHECK_TOKEN_EXIT_CODES = {
 }
 
 
+def probe_keyword_syntax(credentials, client_factory=None, terms=("过敏原", "自身抗体")):
+    """实测 `keywords` 支持哪种拼接语义，用来决定清单能不能合并成更少的 query。
+
+    已知 `keywords` 数组是 AND（交集）。未知的是「能不能在一个字符串里表达 OR」——
+    如果可以，一行一条的项目代号清单就能按谱系合并，检索次数直接降一个量级。
+
+    做法是打 7 次 `pageSize=1` 的最小检索（不消耗回源配额）：两个单词各一次拿基线，
+    数组双词一次验 AND，四种候选 OR 写法各一次。判据是命中总数——OR 成立时结果应当
+    **大于两个基线中的较大者**（并集），AND 成立时应当小于较小者。
+    """
+    first, second = terms
+    factory = client_factory or (lambda: JrbxClient(credentials, delay=1.2))
+    client = factory()
+    end = datetime.now()
+    start = end - timedelta(days=30)
+
+    variants = [
+        ("单词A", [first]),
+        ("单词B", [second]),
+        ("数组双词(已知AND)", [first, second]),
+        ("单串空格", [f"{first} {second}"]),
+        ("单串竖线", [f"{first}|{second}"]),
+        ("单串OR", [f"{first} OR {second}"]),
+        ("单串加号", [f"{first}+{second}"]),
+    ]
+    results = []
+    for name, keywords in variants:
+        row = {"variant": name, "keywords": keywords, "total": None, "error": ""}
+        try:
+            content = client.search(keywords, start, end, 1, 1, [])
+            # 列表响应的计数字段是 totalCount（totalPage 会随 pageSize 变），别用 total。
+            row["total"] = content.get("totalCount")
+        except JrbxError as exc:
+            row["error"] = str(exc)
+        results.append(row)
+
+    totals = {row["variant"]: row["total"] for row in results if isinstance(row["total"], int)}
+    base = max((totals.get("单词A") or 0), (totals.get("单词B") or 0))
+    union_like = sorted(
+        name for name, total in totals.items()
+        if name.startswith("单串") and total > base
+    )
+    return {
+        "window": f"{start:%Y-%m-%d}..{end:%Y-%m-%d}",
+        "results": results,
+        "or_supported_by": union_like,
+        "verdict": (
+            f"可用 OR 写法：{'、'.join(union_like)}——清单可按谱系合并，检索次数大幅下降"
+            if union_like else
+            "没有一种单串写法返回并集，判定不支持 OR；清单保持一行一条"
+        ),
+    }
+
+
 def parse_queries():
     text = REFERENCE_FILE.read_text(encoding="utf-8")
-    marker = "## 默认 Query"
+    marker = "## 检索 Query 清单"
     if marker not in text:
         raise JrbxError(f"{REFERENCE_FILE} 缺少“{marker}”")
     section = text.split(marker, 1)[1].split("\n## ", 1)[0]
@@ -819,6 +873,10 @@ def main():
         help="从 stdin 读取浏览器 USER_INFO#1 的整段 JSON，解出三字段写入 config/jrbx.json",
     )
     parser.add_argument(
+        "--probe-keyword-syntax", action="store_true",
+        help="实测 keywords 支持哪种拼接语义（7 次最小检索），用于判断清单能否合并",
+    )
+    parser.add_argument(
         "--offline", action="store_true",
         help="--check-token 时只解析 JWT 有效期，不发探测请求（查不出被顶号）",
     )
@@ -846,6 +904,11 @@ def main():
                 f"已写入 {path}（该文件在 .gitignore 中，禁止提交或外发）",
                 file=sys.stderr,
             )
+            return 0
+
+        if args.probe_keyword_syntax:
+            report = probe_keyword_syntax(load_credentials())
+            print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0
 
         if args.check_token:

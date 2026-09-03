@@ -22,7 +22,7 @@ from search_common import canonical_url, compact_text, write_candidates
 
 
 ROOT = Path(__file__).resolve().parent.parent
-REFERENCE_FILE = ROOT / "references" / "ccgp.md"
+REFERENCE_FILE = ROOT / "references" / "keywords.md"
 SEARCH_ENDPOINT = "https://search.ccgp.gov.cn/bxsearch"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -39,7 +39,7 @@ class CCGPError(Exception):
 
 def parse_query_list():
     text = REFERENCE_FILE.read_text(encoding="utf-8")
-    marker = "## 默认单词 Query"
+    marker = "## 检索 Query 清单"
     if marker not in text:
         raise CCGPError(f"{REFERENCE_FILE} 缺少“{marker}”")
     section = text.split(marker, 1)[1].split("\n## ", 1)[0]

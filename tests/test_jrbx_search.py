@@ -120,29 +120,35 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(split_terms("过敏原"), ["过敏原"])
         self.assertEqual(split_terms(" 过敏原 + 试剂 "), ["过敏原", "试剂"])
 
-    def test_default_queries_come_from_the_reference_file(self):
+    def test_default_queries_come_from_the_shared_keyword_table(self):
+        # 清单在 references/keywords.md，与 CCGP 共用一份；适配器不另存副本。
+        from ccgp_search import parse_query_list
+
         queries = parse_queries()
-        self.assertIn("过敏原", queries)
-        # 睿销不禁止空格（旧豆包适配器禁止），但清单仍应是干净的单词或 AND 组词
+        self.assertEqual(queries, parse_query_list())
+        self.assertEqual(len(queries), len(set(queries)))
         for query in queries:
             self.assertTrue(query.strip())
             self.assertNotIn(" ", query)
+            self.assertNotIn("`", query)
 
-    def test_bare_generic_reagent_words_are_not_in_the_list(self):
-        # 2026-09-03 裁撤：睿销是库内全文检索，裸「试剂」类词把 92% 的召回交给预筛去扔。
-        # 意图闸门改由 AND 组词承担（references/jrbx.md「默认 Query」）。
+    def test_project_codes_are_searched_not_only_screened(self):
+        # 表里一行一条 query，项目代号一律进检索。
         queries = parse_queries()
-        for banned in ("试剂", "检测试剂", "检验试剂", "检验科试剂",
-                       "体外诊断试剂", "免疫试剂", "抗体检测试剂", "单项定量检测"):
-            self.assertNotIn(banned, queries)
-        self.assertTrue([q for q in queries if "+" in q], "应保留 AND 组词承担宽召回")
+        for code in ("dsDNA", "Ro52", "gp210", "sp100", "ZnT8", "PLA2R", "MDA5",
+                     "AMA-M2", "Dsg", "BP180", "IL-", "TNF", "IFN",
+                     "CENP-B", "Scl", "Jo-1", "C1q", "RA33", "CCP"):
+            self.assertIn(code, queries)
 
-    def test_chemiluminescence_and_plate_reader_instruments_are_gone(self):
-        # 化学发光改为硬排除（keywords.md §10.1）；酶免整机不是本司生意，只留方法学词。
+    def test_only_the_two_tables_feed_the_list(self):
+        # 两张表以外的词——通用「试剂」词、方法学、仪器、甲状腺——都不在清单里。
         queries = parse_queries()
-        for banned in ("化学发光免疫分析仪", "酶联免疫分析仪", "全自动酶免仪"):
+        for banned in ("试剂", "检测试剂", "免疫试剂", "检验科试剂", "检验试剂",
+                       "体外诊断试剂", "抗体检测试剂", "生化免疫",
+                       "酶免", "酶联免疫", "荧光免疫", "免疫荧光", "微流控",
+                       "标本前处理", "标本后处理", "化学发光", "免疫分析仪",
+                       "甲状腺球蛋白", "Anti-TPO"):
             self.assertNotIn(banned, queries)
-        self.assertIn("酶免", queries)
 
 
 class CredentialTests(unittest.TestCase):

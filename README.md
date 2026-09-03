@@ -1,6 +1,6 @@
 # IVD Bid Radar Skill
 
-面向过敏原、自身免疫IVD试剂和免疫分析仪器采购情报的无人值守管线：默认检索最近72小时，完成去重、快速网页核验、医院库匹配和固定15字段Webhook推送。
+面向过敏原、自身免疫IVD试剂和免疫分析仪器采购情报的无人值守管线：默认检索最近72小时，完成去重、快速网页核验、医院库匹配和固定16字段Webhook推送。
 
 ## 处理流程
 
@@ -10,7 +10,7 @@
   → 标题与内容信号预筛
   → 每批10条快速核验（CCGP缺字段时可按需读取直链附件）
   → 全国医院库确定性匹配
-  → 固定15字段校验
+  → 固定16字段校验
   → DryRun
   → Webhook推送与成功回执登记
 ```
@@ -20,11 +20,11 @@
 | 路径 | 用途 |
 |---|---|
 | `SKILL.md` | 运行契约与模式选择 |
-| `references/schema.md` | 固定15字段、医院匹配和大区规则 |
+| `references/schema.md` | 固定16字段、医院匹配和大区规则 |
 | `references/verification.md` | 快速核验协议 |
-| `references/keywords.md` | 固定30条单词Query、品类词与边际贡献实测方法 |
-| `references/jrbx.md` | 睿销调用约束：登录态凭证、AND组词Query、回源URL配额 |
-| `references/ccgp.md` | CCGP单词Query、普通HTTP约束和来源优先级 |
+| `references/keywords.md` | 业务方《过敏》《自免》两张关键词表，三个信源的Query清单与筛选判据都在这里 |
+| `references/jrbx.md` | 睿销调用约束：登录态凭证、keywords的AND语义、回源URL配额 |
+| `references/ccgp.md` | CCGP的普通HTTP约束、单词Query限制和来源优先级 |
 | `references/plap.md` | 军队采购网匿名公开检索、混合策略和正文降级规则 |
 | `scripts/tender_search.py` | 可插拔多来源统一检索入口 |
 | `scripts/jrbx_search.py` | 睿销聚合库检索、回源链接补全与凭证维护 |
@@ -90,8 +90,8 @@ python scripts/tender_pipeline.py record-push --run-dir <检索目录> --receipt
 字段严格为：
 
 ```text
-标题、单位、地区、所属省/市、所属大区、发布时间、截止时间、预算、采购方式、
-科室、命中关键词、内容（检索的摘要）、链接、医院全名、医院等级
+标题、项目编号、单位、地区、所属省/市、所属大区、发布时间、截止时间、预算、
+采购方式、科室、命中关键词、内容（检索的摘要）、链接、医院全名、医院等级
 ```
 
 所有字段都是字符串；缺失统一填`"null"`。详细示例见`references/schema.md`。

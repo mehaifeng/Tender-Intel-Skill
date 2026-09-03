@@ -30,9 +30,10 @@ class WebhookSchemaTests(unittest.TestCase):
         self.assertEqual(normalize_region_location("北京市朝阳区", "北京"), "北京市朝阳区")
         self.assertEqual(normalize_region_location("朝阳区", "北京"), "北京市朝阳区")
 
-    def test_flat_fifteen_field_payload_is_valid(self):
+    def test_flat_sixteen_field_payload_is_valid(self):
         payload = self._payload()
-        self.assertEqual(len(payload), 15)
+        self.assertEqual(len(payload), 16)
+        self.assertEqual(list(payload)[:2], ["标题", "项目编号"])
         self.assertEqual(validate_payload(payload), [])
 
     def test_bare_local_place_is_rejected(self):

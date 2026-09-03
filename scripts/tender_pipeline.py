@@ -3,7 +3,7 @@
 """IVD Bid Radar 的轻量状态机、医院匹配与 Webhook 载荷门禁。
 
 模型只处理 prepare 生成的小批次；脚本负责去重、保守预筛、医院库匹配、
-固定 15 字段归一化、载荷导出和成功回执登记。本脚本不发送网络请求。
+固定 16 字段归一化、载荷导出和成功回执登记。本脚本不发送网络请求。
 """
 
 import argparse
@@ -35,12 +35,12 @@ DEFAULT_PREPARE_MODE = "daily-push"
 DECISIONS = {"create", "exclude", "manual"}
 
 WEBHOOK_FIELDS = [
-    "标题", "单位", "地区", "所属省/市", "所属大区", "发布时间", "截止时间",
+    "标题", "项目编号", "单位", "地区", "所属省/市", "所属大区", "发布时间", "截止时间",
     "预算", "采购方式", "科室", "命中关键词", "内容（检索的摘要）", "链接",
     "医院全名", "医院等级",
 ]
 HIGH_RISK_FIELDS = {
-    "单位", "地区", "所属省/市", "截止时间", "预算", "采购方式", "科室", "医院全名",
+    "项目编号", "单位", "地区", "所属省/市", "截止时间", "预算", "采购方式", "科室", "医院全名",
 }
 REGIONS = {
     "北京直管区", "华中大区", "东北一区", "东南大区", "华北二区", "西北大区",
@@ -488,7 +488,7 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
         summary = compact_text(content.get("summary"), limit=2000)
         search_text = "\n".join((item.get("title", ""), content.get("summary", ""), content.get("content", "")))
         # 统一层兜底：适配器各自的硬排除只覆盖 jrbx 与 PLAP，CCGP 候选到这里才第一次
-        # 过产品域排除。放在品类信号之前——排除优先级高于信号（keywords.md §10.1）。
+        # 过产品域排除。放在目标词之前——排除优先级更高（keywords.md「排除词」）。
         excluded = excluded_domain_term(search_text)
         if excluded:
             screened_out.append({**item, "skip_reason": f"命中非本司产品域硬排除词：{excluded}"})
@@ -767,7 +767,7 @@ def canonicalize_create(row, candidate):
     source_fields = candidate.get("source_fields") or candidate.get("search_evidence", {}).get("source_fields") or {}
     source_evidence = candidate.get("field_evidence") or candidate.get("search_evidence", {}).get("field_evidence") or {}
     if candidate.get("retrieval_verified"):
-        for field in ("单位", "地区", "所属省/市", "截止时间", "预算", "采购方式", "科室"):
+        for field in ("项目编号", "单位", "地区", "所属省/市", "截止时间", "预算", "采购方式", "科室"):
             value = to_webhook_text(source_fields.get(field))
             if record[field] == "null" and value != "null":
                 add_adjustment(row, field, record[field], value, "使用权威来源适配器提取值")
@@ -856,7 +856,7 @@ def validate_create(record, evidence, label):
     if not isinstance(record, dict):
         return errors + [f"{label}.record必须是对象"]
     if list(record.keys()) != WEBHOOK_FIELDS:
-        errors.append(f"{label}.record字段顺序或字段集与固定15字段不一致")
+        errors.append(f"{label}.record字段顺序或字段集与固定16字段不一致")
     for field in WEBHOOK_FIELDS:
         value = record.get(field)
         if not isinstance(value, str) or value == "":
@@ -1137,7 +1137,13 @@ def record_push(run_dir, receipt_path):
         )
     ), None)
     if duplicate:
-        if not (all(duplicate.get(field) == payload[field] for field in WEBHOOK_FIELDS) and duplicate.get("_pushed") is True):
+        # 老版本 seen 记录没有后来新增的字段（如 项目编号）。缺键按一致处理，
+        # 否则同一条公告的重复推送会被误判成“内容不同”而中断。
+        same = all(
+            field not in duplicate or duplicate[field] == payload[field]
+            for field in WEBHOOK_FIELDS
+        )
+        if not (same and duplicate.get("_pushed") is True):
             raise PipelineError("seen中已存在同链接但内容不同的记录")
     else:
         today = datetime.now().astimezone().date().isoformat()

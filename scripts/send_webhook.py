@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""校验并发送IVD Bid Radar固定15字段Webhook载荷。"""
+"""校验并发送IVD Bid Radar固定16字段Webhook载荷。"""
 
 import argparse
 import hashlib
@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 
 
 FIELDS = [
-    "标题", "单位", "地区", "所属省/市", "所属大区", "发布时间", "截止时间",
+    "标题", "项目编号", "单位", "地区", "所属省/市", "所属大区", "发布时间", "截止时间",
     "预算", "采购方式", "科室", "命中关键词", "内容（检索的摘要）", "链接",
     "医院全名", "医院等级",
 ]
@@ -110,7 +110,7 @@ def validate_payload(payload):
         if extra:
             errors.append(f"多余字段：{extra}")
         if not missing and not extra:
-            errors.append("字段顺序与固定15字段不一致")
+            errors.append("字段顺序与固定16字段不一致")
     for field, value in payload.items():
         if not isinstance(value, str) or value == "":
             errors.append(f"{field}必须是非空字符串；缺失填null")
@@ -155,7 +155,7 @@ def validate_manifest(manifest_path, payload_path, payload_sha256):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="发送固定15字段IVD Bid Radar Webhook载荷")
+    parser = argparse.ArgumentParser(description="发送固定16字段IVD Bid Radar Webhook载荷")
     parser.add_argument("--payload", required=True)
     parser.add_argument("--manifest")
     parser.add_argument("--webhook-url", help="仅DryRun可显式传入；Live使用环境变量或config/webhook.json")
