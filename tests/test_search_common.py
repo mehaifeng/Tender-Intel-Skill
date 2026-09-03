@@ -21,13 +21,26 @@ from tender_pipeline import canonicalize_create, historical_identity_keys  # noq
 class ProductDomainScreenTests(unittest.TestCase):
     """三个来源共用同一份硬排除（2026-09-03 起定义在 search_common）。"""
 
-    def test_chemiluminescence_is_hard_excluded(self):
+    def test_chemiluminescence_is_not_hard_excluded(self):
+        # 2026-09-03 试过把化学发光加进硬排除，回跑历史记录时拦下了一条 54 万元的
+        # 血管炎自身抗体试剂盒招标——该词只出现在「可与…化学发光仪配套使用」的资格
+        # 条款里。改为只摘正向信号：去留交给品类信号闸与核实阶段。
         for text in (
             "某医院全自动化学发光免疫分析仪采购项目",
-            "自身抗体检测试剂（化学发光法）公开招标",
+            "血管炎自身抗体检测试剂盒招标，可与现有化学发光仪配套使用",
             "磁微粒发光免疫分析系统采购",
         ):
-            self.assertTrue(excluded_domain_term(text), text)
+            self.assertFalse(excluded_domain_term(text), text)
+
+    def test_reagent_tender_survives_a_chemiluminescence_compatibility_clause(self):
+        text = ("采购血管炎自身抗体检测试剂盒项目招标公告\n"
+                "若所投产品可与科室现有品牌型号化学发光仪配套使用，则设备可无需单独报价")
+        self.assertFalse(excluded_domain_term(text))
+        self.assertIn("自身抗体/自身免疫", target_category_signals(text))
+
+    def test_bare_chemiluminescence_still_fails_the_signal_gate(self):
+        # 只提化学发光、没有任何目标品类信号的公告，由品类信号闸挡下，不需要硬排除。
+        self.assertEqual(target_category_signals("艾滋相关试剂耗材（化学发光）询价公告"), [])
 
     def test_chemiluminescence_is_no_longer_its_own_positive_signal(self):
         # 「化学发光免疫」这条信号已删；仪器整机仍会命中「免疫分析仪器」，但硬排除

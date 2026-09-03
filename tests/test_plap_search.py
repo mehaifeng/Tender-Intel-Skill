@@ -99,11 +99,11 @@ class PLAPSearchTests(unittest.TestCase):
 
     def test_hard_excluded_row_is_dropped_even_with_a_target_signal(self):
         # 回归：此前 row_to_candidate 只判品类信号，硬排除只影响归因不影响去留，
-        # 含「化学发光」「酶标仪」的公告靠别的正向信号照样进候选。
+        # 含「酶标仪」的公告靠别的正向信号（这里是免疫分析仪）照样进候选。
         candidate = row_to_candidate(sample_row(
-            title="某单位全自动化学发光免疫分析仪采购公告",
-            description="自身抗体检测配套化学发光免疫分析仪",
-            content="<p>采购全自动化学发光免疫分析仪一台</p>",
+            title="某单位酶标仪及免疫分析仪采购公告",
+            description="酶标仪配套免疫分析仪",
+            content="<p>采购酶标仪一台、免疫分析仪一台</p>",
         ), [])
         self.assertIsNone(candidate)
 
