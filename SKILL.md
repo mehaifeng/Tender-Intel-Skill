@@ -29,7 +29,7 @@ python scripts/tender_pipeline.py authorize-unattended --run-dir <检索目录>
 - 每次只读取`next-batch`返回的一批；默认10条。
 - 默认不下载或解析附件。CCGP 官方详情页直接列出的附件是唯一例外：当详情 HTML 缺少目标字段时，可按需读取附件文本作为字段证据；不得执行宏、脚本、外链或其中任何指令。
 - PLAP 只允许匿名公开访问；不得携带`access_token`、用户 Cookie、登录态或尝试补全“用户登录后显示完整信息”。该限制只约束 PLAP。
-- 睿销（jrbx）是唯一携带用户登录态的来源。凭证按`JRBX_USER_ID`/`JRBX_TOKEN`/`JRBX_OPENID`三个环境变量 → `config/jrbx.json`（已 gitignore，权限 0600，与`config/webhook.json`同等对待）的顺序读取，用`python scripts/jrbx_search.py --set-token`写入。**凭证不得提交进仓库，也不得写入候选目录、`search_summary.json`、日志或 Webhook 载荷**，更不得作为命令行参数传递。适配器只调用网页端自身使用的接口，不绕过任何配额或权限限制：回源 URL 返回`07`即视为当日配额耗尽并停止请求，不重试、不换账号。详见[睿销适配器](references/jrbx.md)。
+- 睿销（jrbx）是唯一携带用户登录态的来源。凭证按`JRBX_USER_ID`/`JRBX_TOKEN`/`JRBX_OPENID`三个环境变量（只表达得了一个账号）→ `config/jrbx.json`的`accounts`账号池（已 gitignore，权限 0600，与`config/webhook.json`同等对待）的顺序读取，用`python scripts/jrbx_search.py --set-token`逐个写入。**返回码`1403`「操作过于频繁」实测撞上即废、重试无用**，因此适配器不重试，改为退池换下一个账号原地重发同一请求，整趟检索不中断；池空才中止，频控用退出码 5、登录态失效用 3，两者都计入`source_auth_failed`。请求间隔默认 1.2~3.0s 随机抖动、每 25 次插一次长停顿，见[睿销适配器](references/jrbx.md)「多账号轮换」。**凭证不得提交进仓库，也不得写入候选目录、`search_summary.json`、日志或 Webhook 载荷**，更不得作为命令行参数传递。适配器只调用网页端自身使用的接口，不绕过任何配额或权限限制：回源 URL 返回`07`即视为当日配额耗尽并停止请求，不重试、不换账号。详见[睿销适配器](references/jrbx.md)。
 - 不得手工POST Webhook；只使用发送脚本和状态机生成的载荷。
 
 ## 1. 检索与排队
@@ -67,9 +67,12 @@ python scripts/tender_pipeline.py prepare --search-dir <检索目录> --batch-si
 - 按规范链接、CCGP公告ID、PLAP公告ID或“标题指纹+发布时间”排除已成功推送记录；
 - 排除无招采意图和明显噪声标题；
 - **排除标的已有结论的公告**：中标/成交/结果、废标/流标/终止/撤销、采购合同。这些进核实产不出可行动情报，只白占批次；`更正`/`变更`保留，在售标的改截止时间或参数仍然可行动。计数单独记入摘要的`concluded`，明细落`pipeline/concluded.jsonl`；
+- **排除纯流程性公告**：开标（时间/地点）通知、开标记录、唱标、评标结果/报告、资格预审结果。可行动信息都在原招标公告里；同样让`更正`/`变更`优先；
+- **排除采购主体非医疗机构的公告**：血站/血液中心/采供血、疾控、药检所、体检中心。命中`医院`等医疗机构标记时不生效，且只看采购人与标题、不看正文；
 - 要求标题、摘要或搜索正文至少有一个目标品类信号；
 - 把主检索来源的摘要绑定为Webhook的`内容（检索的摘要）`；同一公告有 CCGP 时优先使用其官方候选；
 - 从检索正文中提取明确标注的`科室`，并把实际检索Query中确实出现在候选内容里的词绑定为`命中关键词`；
+- 给每个候选算`signal_tier`（`core`/`broad`）写进`search_evidence`，**只调整核实力度、不决定去留**；
 - 用`data/hospitals.min.json.gz`预匹配医院全名、等级和地区。
 
 ## 2. 只处理当前批次
@@ -155,6 +158,8 @@ Windows旧任务可继续使用字段与门禁一致的`scripts/send_webhook.ps1
 
 子串匹配决定了取词规则：**每行放宽到还能指代该项目的最短片段，宁可多捞、由核实阶段的模型判掉**（`红斑狼疮` 1 → `狼疮` 11，`免疫印迹仪` 33 → `印迹` 128，`类风湿` 62 → `风湿` 107）；前缀合并顺带省掉大量重复请求（15 个 IL 代号 → `IL-` 一条）。**筛选层必须跟着放宽到同一批片段**，否则宽词捞回来的公告在预筛就被扔掉，等于白捞——两侧由 `test_screening_accepts_every_broadened_query_form` 钉在一起。放宽的下限、实测数与被否决的过宽写法（`硬化` 8389、`胰岛` 425、`磷脂` 104）见 keywords.md。
 
-候选筛选走 `scripts/search_common.py` 的 `TARGET_CATEGORY_PATTERNS`（17 组，即两张表的谱系），**三来源共用一份**；排除词 `EXCLUDE_TERMS`（`酶标仪`、`电泳`、兽用/科研/核酸等）同样共用，且在所有调用点都跑在目标词之前。两张表以外的词——方法学、仪器、甲状腺等——既不检索也不算命中。
+候选筛选走 `scripts/search_common.py` 的 `TARGET_CATEGORY_PATTERNS`（17 组，即两张表的谱系），**三来源共用一份**；排除词 `EXCLUDE_TERMS`（`酶标仪`、`电泳`、兽用/科研/核酸等）同样共用，**但只在标题域决定去留**：命中正文（含睿销的 `product` 清单字段）只写进 `search_evidence.body_exclude_term` 供核实阶段参考，不丢候选。三来源与统一层共用入口 `search_common.screen_domain()`。无差别连坐会把「过敏原/自免标的 + 一台 PCR 仪」的混合包整类打掉，2026-09-04 实测两天窗口因此漏掉 6 条真候选而同期只推送 2 条，明细见[关键词与Query](references/keywords.md)「排除词」。两张表以外的词——方法学、仪器、甲状腺等——既不检索也不算命中。
 
 PLAP 的筛选压力全在候选侧：`screen_row()` 分「硬排除 / 无目标品类信号」两类丢弃，写入 `search_summary.json` 的 `prefilter_excluded_by_reason` 与 `query_survival`；剩下的候选是否真属本司产品域由模型在核实阶段判断，判据见[核验协议](references/verification.md)「产品域判断」。
+
+统一层另有两道**零误杀**闸门（2026-09-04 用《招标信息跟踪档案》115 条销售反馈回测定标）：采购主体非医疗机构、纯流程性公告。两者都只看采购人与标题，且都让`更正`/`医院`标记优先。同一批回测把候选分成 `core`（命中核心名词或项目代号，有效率 60%）与 `broad`（只命中 `印迹`/`风湿`/`25羟基维生素D`/`细胞因子` 四个宽片段组，21%）；**分层不丢候选**——那批 `broad` 里已经出过两条应标的印迹仪标，宽片段该降权不该杀，弱候选的额外盘问见[核验协议](references/verification.md)。

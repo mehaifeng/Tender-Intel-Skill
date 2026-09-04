@@ -77,8 +77,12 @@ ADAPTERS = {
 }
 DEFAULT_SOURCES = "jrbx,ccgp,plap"
 
-# 登录态失效必须与“今天没有新公告”区分开：jrbx_search.py 用退出码 3 表达。
-AUTH_ERROR_EXIT_CODE = 3
+# 凭证类失败必须与“今天没有新公告”区分开：jrbx_search.py 用 3 表示登录态失效、
+# 5 表示账号池全部被判频控（1403）。两者都要报警，只是处置不同。
+AUTH_ERROR_EXIT_CODES = {
+    3: "登录态失效",
+    5: "账号池全部被判频控（1403）",
+}
 
 
 def parse_sources(value):
@@ -170,12 +174,12 @@ def main():
         usable = (source_dir / "candidate_index.jsonl").exists()
         if usable:
             usable_dirs.append(source_dir)
-        auth_error = completed.returncode == AUTH_ERROR_EXIT_CODE
+        auth_error = completed.returncode in AUTH_ERROR_EXIT_CODES
         if auth_error:
             # 无人值守时这类失败最危险：它看起来像“今天没情报”，实际是凭证掉了。
             print(
-                f"警告：来源 {source} 登录态失效，本次未产出任何候选；"
-                f"需要更新凭证后重跑，详见该来源的错误输出",
+                f"警告：来源 {source} {AUTH_ERROR_EXIT_CODES[completed.returncode]}，"
+                f"本次未产出任何候选；需要更新凭证后重跑，详见该来源的错误输出",
                 file=sys.stderr,
             )
         runs.append({

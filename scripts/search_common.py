@@ -85,10 +85,14 @@ TARGET_CATEGORY_PATTERNS = [
         r"beta\s*2\s*糖蛋白", r"糖蛋白\s*[ⅠI1]\s*抗体", _codes("aCL(?:-[AGM])*", "GP1"),
     )),
     ("类风湿谱", _any(
-        r"风湿", r"类风关", r"环瓜氨酸",
+        r"类风关", r"环瓜氨酸",
         _codes("RF-[AGM]", "RA33"),
         r"抗\s*CCP(?![0-9A-Za-z])", r"(?<![0-9A-Za-z])CCP\s*抗体",
     )),
+    # `风湿` 是 `类风湿` 放宽出来的宽片段，单独成组只为分层（BROAD_SIGNAL_GROUPS）：
+    # 它捞回的多是大宗试剂包里以免疫比浊法跑在生化仪上的类风湿因子单项，属别的品类。
+    # 仍然保留检索与筛选——`免疫印迹仪` 那两条已应标的标就是宽片段捞回来的。
+    ("风湿(宽片段)", _any(r"风湿")),
     ("糖尿病自身抗体", _any(
         r"脱羧酶", r"胰岛细胞", r"酪氨酸磷酸酶抗体", r"胰岛素(?:自身)?抗体",
         r"锌转运蛋白", r"糖尿病[^\n]{0,8}(?:自身)?抗体",
@@ -118,8 +122,8 @@ TARGET_CATEGORY_PATTERNS = [
     )),
 ]
 
-# 非本司产品域，命中即判无关，**优先级高于 TARGET_CATEGORY_PATTERNS**。
-# 三个来源共用同一份，词表见 references/keywords.md「排除词」。
+# 非本司产品域的排除词。三个来源共用同一份，词表见 references/keywords.md「排除词」。
+# **只在标题域决定去留**，正文域改为打标记——原因见 screen_domain。
 EXCLUDE_TERMS = re.compile(
     r"酶标仪|电泳|兽医|兽用|畜牧|生猪|结核|干扰素释放|免疫组化|重组蛋白|培养基|缓冲液|核酸|PCR|测序",
     re.I,
@@ -129,6 +133,96 @@ EXCLUDE_TERMS = re.compile(
 def excluded_domain_term(text):
     """命中的硬排除词；未命中返回空串。用于把排除理由写进 skip_reason。"""
     match = EXCLUDE_TERMS.search(text or "")
+    return match.group(0) if match else ""
+
+
+def screen_domain(title_text, body_text=""):
+    """三来源共用的产品域预筛，返回 dict(keep/reason/signals/body_exclude_term)。
+
+    `title_text` 是「这条公告是关于什么的」——标题，以及标题派生的产品词。
+    `body_text` 是设备与试剂清单——正文、摘要，以及把全部标的拉平成一串的
+    `product` 字段。**清单属于正文域，不是标题域**：睿销的 `product` 会把
+    「全自动体外过敏原筛查系统及其配套试剂」和「梯度pcr」并列写进同一个字段。
+
+    硬排除只在标题域决定去留。正文域命中排除词不再丢弃候选：一份几十行的科室
+    设备清单几乎必然出现 PCR、核酸或培养基，无差别连坐会把混合包整类打掉。
+    2026-09-04 用 09-03~09-04 两天窗口实测，这条规则让睿销漏 5 条、CCGP 漏 1 条
+    真候选，其中三条正文写明「全自动自身抗体检测系统」「全自动体外过敏原筛查
+    系统及其配套试剂」「化学发光免疫分析仪(自身免疫检测+过敏原专用)」；同期
+    实际推送只有 2 条，漏的比发的多。混合包本就该交给核实阶段判
+    （references/verification.md「大宗混合包」），预筛不该替它做决定。
+
+    这不会放宽整体口径：正文有排除词、又没有目标品类信号的候选，仍然被
+    「无目标品类信号」丢掉——正文域的硬排除本来就与那一条冗余，唯一独立生效的
+    场合正是上面这类误杀。正文域命中的词随候选带出，写进
+    `search_evidence.body_exclude_term`，让核实阶段知道这是混合包。
+    """
+    title_text = title_text or ""
+    body_text = body_text or ""
+    term = excluded_domain_term(title_text)
+    if term:
+        return {
+            "keep": False,
+            "reason": f"标题命中非本司产品域硬排除词：{term}",
+            "signals": [],
+            "body_exclude_term": "",
+        }
+    signals = target_category_signals("\n".join((title_text, body_text)))
+    if not signals:
+        return {
+            "keep": False,
+            "reason": "标题、摘要和搜索正文均无目标品类信号",
+            "signals": [],
+            "body_exclude_term": "",
+        }
+    return {
+        "keep": True,
+        "reason": "",
+        "signals": signals,
+        "body_exclude_term": excluded_domain_term(body_text),
+    }
+
+
+# 宽片段组：检索词按最短片段放宽（keywords.md）时多出来的那部分召回。
+# 2026-09-04 用《招标信息跟踪档案》115 条销售反馈回测，当前清单仍会召回的 45 条样本里：
+# 命中核心名词或项目代号的 30 条有效率 60%，只命中宽片段的 14 条有效率仅 21%。
+# **不作为丢弃依据**——这 14 条里的「中山大学孙逸仙纪念医院免疫印迹仪」等两条已应标；
+# 只用来给候选分层，让核实阶段对弱候选多问一句（references/verification.md）。
+BROAD_SIGNAL_GROUPS = frozenset({
+    "印迹",            # 会捞到免疫印迹「成像仪」这类科研凝胶设备
+    "风湿(宽片段)",     # 会捞到生化室以免疫比浊法跑的类风湿因子单项
+    "25羟基维生素D",    # 业务方表里有，一线反馈「公司无相关产品」，待确认
+    "细胞因子",        # 同上
+})
+
+# 采购主体不是医疗机构时，招的必然不是本司产品域的东西。
+# 同一批反馈回测：血站 0/6、疾控 0/3、药检所 0/1、体检中心 0/1 全部判无效，且没有
+# 任何一条有效标讯会被这条规则误杀。成因是这些主体的检验场景本就不同——血站做献血
+# 筛查（乙肝/丙肝/梅毒/艾滋酶免），疾控做传染病与公卫监测，药检所检药品，体检中心
+# 走常规生化免疫套餐，都不是过敏原与自身免疫的临床检验场景。
+NON_HOSPITAL_BUYER_RE = re.compile(
+    r"血站|血液中心|采供血|中心血库|"
+    r"疾病预防控制|疾控中心|"
+    r"药品检验|药检所|食品药品检验|"
+    r"体检中心"
+)
+# 医疗机构标记，命中即视为医院采购。「XX医院体检中心」「XX医院输血科」是医院的科室，
+# 不是独立的体检中心或血站，不能被上面那条误伤。
+HOSPITAL_MARKER_RE = re.compile(
+    r"医院|卫生院|卫生服务中心|医疗中心|医学中心|保健院|医共体|医疗集团|疗养院"
+)
+
+
+def non_hospital_buyer(buyer, title=""):
+    """非医疗机构采购主体；是医院或判断不出来时返回空串。
+
+    **只看采购人名称与标题，不看正文**——正文里顺带提到「送疾控复核」「血站供血」的
+    医院标不该被这条规则误杀。
+    """
+    text = " ".join(str(value or "") for value in (buyer, title))
+    if HOSPITAL_MARKER_RE.search(text):
+        return ""
+    match = NON_HOSPITAL_BUYER_RE.search(text)
     return match.group(0) if match else ""
 
 
@@ -182,6 +276,18 @@ def plap_notice_id(url):
 
 def target_category_signals(text):
     return [name for name, pattern in TARGET_CATEGORY_PATTERNS if pattern.search(text or "")]
+
+
+def signal_tier(signals):
+    """候选的目标信号强度。
+
+    `core` 命中过任一核心名词组或项目代号组；`broad` 只命中宽片段组；`none` 无信号。
+    分层不决定去留，只进 search_evidence 供核实阶段调整盘问力度。
+    """
+    signals = list(signals or [])
+    if not signals:
+        return "none"
+    return "broad" if all(name in BROAD_SIGNAL_GROUPS for name in signals) else "core"
 
 
 def notice_family(value):
@@ -256,6 +362,9 @@ def write_candidates(candidates, out_dir, run_date):
             "source_url": url,
             "summary": item.get("summary") or "",
             "content": item.get("content") or "",
+            # 来源自带的标的清单（睿销 product 之类）。正文写「详见附件」「下载」时，
+            # 这是唯一能定品类的字段——不落盘统一层就只能看到一篇没有清单的公告。
+            "product_list": item.get("product_list") or "",
             "source_fields": item.get("source_fields") or {},
             "field_evidence": item.get("field_evidence") or {},
             "attachments": item.get("attachments") or [],
@@ -405,6 +514,8 @@ def merge_source_dirs(source_dirs):
             "rank_score": primary_candidate.get("rank_score"),
             "summary": primary_content.get("summary") or "",
             "content": primary_content.get("content") or "",
+            # 合并时同样要带上：清单丢在这一步，统一层照样看不到品类。
+            "product_list": primary_content.get("product_list") or "",
             "source_fields": primary_content.get("source_fields") or primary_candidate.get("source_fields") or {},
             "field_evidence": primary_content.get("field_evidence") or primary_candidate.get("field_evidence") or {},
             "attachments": primary_content.get("attachments") or primary_candidate.get("attachments") or [],

@@ -22,8 +22,9 @@ from search_common import (
     ccgp_article_id,
     notice_family,
     plap_notice_id,
-    excluded_domain_term,
-    target_category_signals,
+    screen_domain,
+    non_hospital_buyer,
+    signal_tier,
     title_fingerprint as common_title_fingerprint,
 )
 
@@ -95,6 +96,12 @@ TERMINAL_NOTICE_FAMILIES = ("结果", "终止", "合同")
 # 但不改 notice_family 本身——它同时是去重键的一部分，改它会动公告身份。
 TERMINAL_TITLE_RE = re.compile(
     r"(?:合同|合同备案)\s*$|结果公示|成交公示|结果更正|候选人公示|履约验收"
+)
+# 纯流程性公告：只通报开标/评标环节的时间、地点或过程，标的本身的可行动信息都在原
+# 招标公告里，推给销售是重复打扰。2026-09-04 用销售反馈回测：命中的全部判无效，无误杀。
+# 「更正／变更」优先于本表——更正公告改的是在售标的的截止时间或参数，仍然可行动。
+PROCEDURAL_NOTICE_RE = re.compile(
+    r"开标(?:时间|地点)?通知|开标记录|唱标|评标(?:结果|报告)|资格预审结果"
 )
 CLEAR_EXCLUDES = [
     re.compile(pattern, re.I)
@@ -197,7 +204,9 @@ def historical_identity_keys(title, url, publish_time):
     """跨运行去重：链接/公告号直接判重，标题需同时匹配发布日期。"""
     keys = set()
     normalized = normalize_url(url)
-    if normalized:
+    # 空链接会被 normalize_url 归一成 "/"，那是所有无链接记录共用的伪身份键：
+    # 一旦进了 known_keys，第一条无链接记录就会把后面所有无链接记录判成重复。
+    if normalized and normalized != "/":
         keys.add(("url", normalized))
     article_id = ccgp_article_id(normalized)
     if article_id:
@@ -234,6 +243,15 @@ def to_webhook_text(value):
 
 def is_clear_exclude(title):
     return next((pattern.pattern for pattern in CLEAR_EXCLUDES if pattern.search(title or "")), None)
+
+
+def procedural_notice(title):
+    """纯流程性公告；不是就返回空串。更正／变更公告不算，它们仍然可行动。"""
+    text = str(title or "")
+    if re.search(r"更正|变更", text):
+        return ""
+    match = PROCEDURAL_NOTICE_RE.search(text)
+    return match.group(0) if match else ""
 
 
 def has_procurement_intent(title):
@@ -479,6 +497,10 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
         if not has_procurement_intent(item.get("title", "")):
             screened_out.append({**item, "skip_reason": "标题缺少招采/交易意图词"})
             continue
+        procedural = procedural_notice(item.get("title", ""))
+        if procedural:
+            screened_out.append({**item, "skip_reason": f"纯流程性公告（{procedural}）"})
+            continue
         terminal = terminal_notice_family(item.get("title", ""))
         if terminal:
             concluded.append({**item, "skip_reason": f"标的已有结论（{terminal}公告）"})
@@ -486,16 +508,35 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
 
         content_path, content = load_candidate_content(item, search_dir)
         summary = compact_text(content.get("summary"), limit=2000)
+        # 正文写「详见附件」「下载」时摘要里一个标的都没有，推出去销售无从判断相关性。
+        # 把来源自带的标的清单接在摘要后面——它本来就是这类公告唯一能定品类的内容。
+        product_list = compact_text(content.get("product_list"))
+        if product_list and product_list not in summary:
+            summary = compact_text(" ".join((summary, "【标的清单】" + product_list)), limit=2400)
         search_text = "\n".join((item.get("title", ""), content.get("summary", ""), content.get("content", "")))
-        # 统一层兜底：适配器各自的硬排除只覆盖 jrbx 与 PLAP，CCGP 候选到这里才第一次
-        # 过产品域排除。放在目标词之前——排除优先级更高（keywords.md「排除词」）。
-        excluded = excluded_domain_term(search_text)
-        if excluded:
-            screened_out.append({**item, "skip_reason": f"命中非本司产品域硬排除词：{excluded}"})
+        # 统一层兜底：适配器各自的预筛只覆盖 jrbx 与 PLAP，CCGP 候选到这里才第一次
+        # 过产品域筛选。硬排除只看标题，正文只打标记（search_common.screen_domain）。
+        screen = screen_domain(
+            item.get("title", ""),
+            "\n".join((
+                content.get("summary") or "",
+                content.get("content") or "",
+                # 正文写「详见附件」「下载」时，清单只存在于来源自带的标的字段里。
+                content.get("product_list") or "",
+            )),
+        )
+        if not screen["keep"]:
+            screened_out.append({**item, "skip_reason": screen["reason"]})
             continue
-        signals = target_category_signals(search_text)
-        if not signals:
-            screened_out.append({**item, "skip_reason": "标题、摘要和搜索正文均无目标品类信号"})
+        signals = screen["signals"]
+        # 采购主体闸门放在取到正文之后——`单位` 要等适配器的 source_fields 才拿得到。
+        # 只传采购人与标题，绝不传正文（见 search_common.non_hospital_buyer）。
+        candidate_fields = item.get("source_fields") or content.get("source_fields") or {}
+        non_hospital = non_hospital_buyer(
+            candidate_fields.get("单位") or item.get("site_name", ""), item.get("title", "")
+        )
+        if non_hospital:
+            screened_out.append({**item, "skip_reason": f"采购主体非医疗机构（{non_hospital}）"})
             continue
 
         enriched = item.copy()
@@ -503,10 +544,16 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             item.get("title", ""),
             summary if summary != "null" else "",
             content.get("content", ""),
+            # 命中关键词与科室同样要看清单：正文写「详见附件」时词只在这里。
+            content.get("product_list", ""),
         ))
         enriched["search_evidence"] = {
             "title_has_procurement_intent": True,
             "target_category_signals": signals,
+            "signal_tier": signal_tier(signals),
+            # 正文里同时出现的非本司产品域词。非排除依据——它只说明这是混合包，
+            # 提示核实阶段确认本司品类那一两行是真的（verification.md「大宗混合包」）。
+            "body_exclude_term": screen["body_exclude_term"],
             "summary": summary,
             "content_path": item["content_path"],
             "content_sha256": sha256_file(content_path),
@@ -589,6 +636,10 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             "already_seen": len(already_seen),
             "screened_out": len(screened_out),
             "concluded": len(concluded),
+            "queued_broad_signal_only": sum(
+                1 for row in queue
+                if row["search_evidence"]["signal_tier"] == "broad"
+            ),
             "completed_batches": 0,
         },
         "batches": batches,

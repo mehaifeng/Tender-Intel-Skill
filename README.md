@@ -23,7 +23,7 @@
 | `references/schema.md` | 固定16字段、医院匹配和大区规则 |
 | `references/verification.md` | 快速核验协议 |
 | `references/keywords.md` | 业务方《过敏》《自免》两张关键词表，三个信源的Query清单与筛选判据都在这里 |
-| `references/jrbx.md` | 睿销调用约束：登录态凭证、keywords的AND语义、回源URL配额 |
+| `references/jrbx.md` | 睿销调用约束：登录态账号池与1403轮换、keywords的AND语义、回源URL配额 |
 | `references/ccgp.md` | CCGP的普通HTTP约束、单词Query限制和来源优先级 |
 | `references/plap.md` | 军队采购网匿名公开检索、混合策略和正文降级规则 |
 | `scripts/tender_search.py` | 可插拔多来源统一检索入口 |
@@ -41,7 +41,7 @@
 
 开箱包已经包含本地`config/webhook.json`，可以直接运行。该文件含凭据，已被Git忽略，请勿公开分享。
 
-睿销登录态按环境变量`JRBX_USER_ID`、`JRBX_TOKEN`、`JRBX_OPENID` → `config/jrbx.json`的顺序读取；后者用`python scripts/jrbx_search.py --set-token`写入，已被Git忽略。token有效期20天，过期需微信重新扫码，用`--check-token`查剩余天数。Webhook按环境变量`FEISHU_WEBHOOK_URL` → 旧环境变量`FEISHU_CREATE_WEBHOOK_URL` → `config/webhook.json`的顺序读取。
+睿销登录态按环境变量`JRBX_USER_ID`、`JRBX_TOKEN`、`JRBX_OPENID`（只表达得了一个账号）→ `config/jrbx.json`的`accounts`账号池的顺序读取；后者用`python scripts/jrbx_search.py --set-token`逐个写入，已被Git忽略。token有效期20天，过期需微信重新扫码，用`--check-token`逐个查剩余天数。返回码`1403`实测撞上即废，适配器会退池换下一个账号原地重发同一请求，池空才以退出码5中止，因此多备几个账号能让一趟检索跑完。Webhook按环境变量`FEISHU_WEBHOOK_URL` → 旧环境变量`FEISHU_CREATE_WEBHOOK_URL` → `config/webhook.json`的顺序读取。
 
 ## 运行
 

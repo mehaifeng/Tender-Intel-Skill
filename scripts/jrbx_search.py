@@ -14,6 +14,7 @@ import argparse
 import base64
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -29,8 +30,7 @@ from search_common import (
     canonical_url,
     compact_text,
     extract_project_id,
-    excluded_domain_term,
-    target_category_signals,
+    screen_domain,
     write_candidates,
 )
 
@@ -96,6 +96,14 @@ class JrbxAuthError(JrbxError):
     """登录态失效，必须中止并报警。"""
 
 
+class JrbxRateLimitError(JrbxAuthError):
+    """账号池里每个账号都被判了频控，无号可换，必须中止并报警。
+
+    实测撞上 1403 的账号即废，跟「token 过期」不是一回事，因此单列一个退出码（5），
+    定时任务才分得清该重新扫码还是该把节流参数调松。
+    """
+
+
 class _TextParser(HTMLParser):
     BLOCKS = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "table"}
 
@@ -126,35 +134,66 @@ def html_to_text(value):
     return "\n".join(line for line in lines if line)
 
 
-def _read_credentials_file(path=None):
-    """config/jrbx.json 的三字段；文件不存在或字段不全时返回 {}。"""
+def mask_user_id(value):
+    """userId 是登录态三字段之一，进日志、摘要和报告时一律只留前四位。"""
+    value = str(value or "")
+    return (value[:4] + "…") if value else ""
+
+
+def _account_fields(node):
+    """从一个账号对象里取三字段；不全时返回 {}——半个凭证发出去只会白撞一次频控。"""
+    if not isinstance(node, dict):
+        return {}
+    got = {k: str(node.get(k) or "").strip() for k in ("userId", "token", "openid")}
+    return got if all(got.values()) else {}
+
+
+def read_credential_pool_file(path=None):
+    """config/jrbx.json 的账号池，按文件里的顺序返回；文件不存在时返回 []。
+
+    现行格式是 `{"accounts": [{userId, token, openid}, ...]}`；旧的三字段平铺格式
+    仍然读得动，等价于只有一个账号的池。
+    """
     path = Path(path or CREDENTIALS_FILE)
     if not path.exists():
-        return {}
+        return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise JrbxAuthError(f"{path} 不是合法 JSON：{exc}") from exc
-    got = {k: str(data.get(k) or "").strip() for k in ("userId", "token", "openid")}
-    return got if all(got.values()) else {}
+    if isinstance(data, dict) and isinstance(data.get("accounts"), list):
+        nodes = data["accounts"]
+    elif isinstance(data, list):
+        nodes = data
+    else:
+        nodes = [data]
+    pool = []
+    for node in nodes:
+        account = _account_fields(node)
+        if account and account not in pool:
+            pool.append(account)
+    return pool
 
 
-def load_credentials(env=None, path=None):
-    """环境变量优先，其次 config/jrbx.json。
+def load_credential_pool(env=None, path=None):
+    """环境变量优先（只表达单账号），其次 config/jrbx.json 的账号池。
 
     该文件在 .gitignore 中，与 config/webhook.json 同等对待：**只允许留在本机**，
     不得提交、不得进候选目录、日志或 Webhook 载荷。命令行仍然不接受凭证明文，
     避免进入进程列表和 shell 历史。
+
+    多账号只解决一件事：撞上 1403 之后还能不能把这一趟检索跑完。适配器按池的顺序
+    串行使用，同一时刻只有一个账号在发请求，不并发、不做负载分摊。
     """
     env = env if env is not None else os.environ
     names = ("JRBX_USER_ID", "JRBX_TOKEN", "JRBX_OPENID")
     if all(env.get(name) for name in names):
-        return {
+        return [{
             "userId": env["JRBX_USER_ID"].strip(),
             "token": env["JRBX_TOKEN"].strip(),
             "openid": env["JRBX_OPENID"].strip(),
-        }
-    from_file = _read_credentials_file(path)
+        }]
+    from_file = read_credential_pool_file(path)
     if from_file:
         return from_file
     missing = [name for name in names if not env.get(name)]
@@ -163,6 +202,11 @@ def load_credentials(env=None, path=None):
         + f" 未设置，且 {CREDENTIALS_FILE} 不存在或字段不全"
         + "；用 `python scripts/jrbx_search.py --set-token` 写入，取值方法见 references/jrbx.md「凭证」"
     )
+
+
+def load_credentials(env=None, path=None):
+    """账号池里的第一个账号，供只关心单账号的调用方使用。"""
+    return load_credential_pool(env, path)[0]
 
 
 def credentials_from_user_info(raw):
@@ -208,16 +252,31 @@ def credentials_from_user_info(raw):
 
 
 def write_credentials_file(credentials, path=None):
-    """写 config/jrbx.json，权限收到仅当前用户可读写。返回写入路径。"""
+    """把一个账号 upsert 进 config/jrbx.json 的账号池，权限收到仅当前用户可读写。
+
+    同 `userId` 就地覆盖（重新扫码换发，不打乱轮换顺序），新 `userId` 追加到池尾。
+    返回写入路径。
+    """
     path = Path(path or CREDENTIALS_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "_说明": "睿销登录态。该文件已在 .gitignore 中，禁止提交或外发；"
-                 "环境变量 JRBX_USER_ID / JRBX_TOKEN / JRBX_OPENID 优先级更高。"
-                 "token 20 天固定窗口，过期只能微信重新扫码，用 --set-token 更新。",
+    account = {
         "userId": credentials["userId"],
         "token": credentials["token"],
         "openid": credentials["openid"],
+    }
+    pool = read_credential_pool_file(path)
+    for position, existing in enumerate(pool):
+        if existing["userId"] == account["userId"]:
+            pool[position] = account
+            break
+    else:
+        pool.append(account)
+    payload = {
+        "_说明": "睿销登录态账号池，按 accounts 顺序串行使用。该文件已在 .gitignore 中，"
+                 "禁止提交或外发；环境变量 JRBX_USER_ID / JRBX_TOKEN / JRBX_OPENID 优先级更高"
+                 "（设了就只用那一个账号）。token 20 天固定窗口，过期只能微信重新扫码，"
+                 "用 --set-token 逐个写入；撞上 1403 的账号即废，用 --check-token 查出来后手动删掉。",
+        "accounts": pool,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     try:
@@ -247,7 +306,7 @@ def check_token(credentials, warn_days=3, probe=True, client_factory=None):
     now = datetime.now()
     expires_at = token_expires_at(credentials["token"])
     report = {
-        "user_id": credentials["userId"],
+        "user_id": mask_user_id(credentials["userId"]),
         "token_expires_at": expires_at.isoformat(timespec="seconds") if expires_at else None,
         "days_remaining": None,
         "warn_days": warn_days,
@@ -274,6 +333,12 @@ def check_token(credentials, warn_days=3, probe=True, client_factory=None):
         try:
             client.search(["试剂"], window_start, window_end, 1, 1, ACTIONABLE_NOTICE_TYPES)
             report["server_accepted"] = True
+        except JrbxRateLimitError:
+            # 撞过 1403 的账号实测即废，但 token 本身没到期，JWT 解析看不出来。
+            report["server_accepted"] = False
+            report["status"] = "rate_limited"
+            report["message"] = "该账号被判频控（1403），实测触发即废，需重新扫码换发"
+            return report
         except JrbxAuthError as exc:
             report["server_accepted"] = False
             report["status"] = "rejected"
@@ -306,8 +371,41 @@ CHECK_TOKEN_EXIT_CODES = {
     "expiring_soon": 4,
     "expired": 3,
     "rejected": 3,
+    "rate_limited": 3,
     "probe_failed": 2,
 }
+
+# 从「最可用」到「最不可用」；池的状态取最可用的那个账号，因为只要还有一个能跑，
+# 检索就不该停——但不可用的账号仍要在报告里点名，否则池会悄悄耗光。
+STATUS_SEVERITY = [
+    "ok", "unknown_expiry", "expiring_soon", "probe_failed",
+    "rate_limited", "rejected", "expired",
+]
+
+
+def check_credential_pool(pool, warn_days=3, probe=True, client_factory=None):
+    """逐个预检账号池，退出码按「这个池今天还能不能跑完一趟检索」取。"""
+    accounts = [
+        check_token(account, warn_days=warn_days, probe=probe, client_factory=client_factory)
+        for account in pool
+    ]
+    best = min(accounts, key=lambda report: STATUS_SEVERITY.index(report["status"]))
+    unusable = [
+        report for report in accounts
+        if report["status"] in ("expired", "rejected", "rate_limited")
+    ]
+    message = best["message"]
+    if unusable:
+        message += "；需重新扫码换发的账号：" + "、".join(
+            f"{report['user_id']}（{report['status']}）" for report in unusable
+        )
+    return {
+        "account_count": len(accounts),
+        "usable_account_count": len(accounts) - len(unusable),
+        "status": best["status"],
+        "message": message,
+        "accounts": accounts,
+    }
 
 
 def probe_keyword_syntax(credentials, client_factory=None, terms=("过敏原", "自身抗体")):
@@ -417,16 +515,69 @@ def from_millis(value):
 
 
 class JrbxClient:
-    def __init__(self, credentials, delay=1.2, timeout=30, max_bytes=20 * 1024 * 1024):
-        self.credentials = credentials
+    """按账号池顺序串行发请求，同一时刻只有一个账号在用。
+
+    1403「操作过于频繁」实测是一次性的：撞上之后该账号即废，退避重试无济于事。
+    因此这里不重试，而是把当前账号退池、换下一个**原地重发同一请求**——请求序列
+    既不丢也不重跑，等价于在被打断的那一步续上。账号全部退池才抛
+    JrbxRateLimitError 中止。
+    """
+
+    def __init__(self, credentials, delay=1.2, timeout=30, max_bytes=20 * 1024 * 1024,
+                 jitter=1.8, pause_every=25, pause_seconds=20.0):
+        pool = [credentials] if isinstance(credentials, dict) else list(credentials)
+        if not pool:
+            raise JrbxAuthError("睿销账号池为空")
+        self.pool = pool
+        self.account_index = 0
+        self.retired = []
         self.delay = max(0.0, float(delay))
+        self.jitter = max(0.0, float(jitter))
+        self.pause_every = max(0, int(pause_every))
+        self.pause_seconds = max(0.0, float(pause_seconds))
         self.timeout = timeout
         self.max_bytes = max_bytes
         self.last_request_at = 0.0
         self.request_count = 0
 
-    def post(self, path, body, retry_on_rate_limit=2):
-        wait = self.delay - (time.monotonic() - self.last_request_at)
+    @property
+    def credentials(self):
+        """当前在用的账号。"""
+        return self.pool[self.account_index]
+
+    def _next_gap(self):
+        """请求间隔：固定下限 + 随机抖动，每 pause_every 次插一次长停顿。
+
+        固定间隔是很明确的机器指纹，而 1403 一撞账号就废，宁可跑慢也别撞。
+        delay 为 0 表示调用方要的是不节流的单次探测（--check-token），一并关掉。
+        """
+        if self.delay <= 0:
+            return 0.0
+        if self.pause_every and self.request_count and self.request_count % self.pause_every == 0:
+            return self.pause_seconds * random.uniform(0.75, 1.5)
+        return self.delay + random.uniform(0.0, self.jitter)
+
+    def _retire(self, reason, detail):
+        """当前账号退池，返回是否还有下一个可用账号。
+
+        只记 userId 前四位：三字段都是登录态，不得进日志、摘要或候选目录。
+        """
+        self.retired.append({
+            "user_id": mask_user_id(self.credentials["userId"]),
+            "reason": reason,
+            "detail": detail,
+            "after_requests": self.request_count,
+        })
+        self.account_index += 1
+        if self.account_index >= len(self.pool):
+            return False
+        if reason == "rate_limited" and self.delay > 0:
+            # 换号了，但出口 IP 没变，站点刚说过太快——先把这一拍让出去再续。
+            time.sleep(self.pause_seconds * random.uniform(0.75, 1.5))
+        return True
+
+    def post(self, path, body):
+        wait = self._next_gap() - (time.monotonic() - self.last_request_at)
         if wait > 0:
             time.sleep(wait)
         payload = dict(body)
@@ -461,11 +612,19 @@ class JrbxClient:
             self.request_count += 1
 
         code = str(document.get("code"))
+        if code == RATE_LIMIT_CODE:
+            # 实测触发即废，重试只是多送一次违规；换号原地重发，不丢这一步。
+            if self._retire("rate_limited", "1403 操作过于频繁"):
+                return self.post(path, body)
+            raise JrbxRateLimitError(
+                f"睿销账号池全部被判频控（code={RATE_LIMIT_CODE}）："
+                f"{len(self.retired)} 个账号已退池，需重新扫码换发；"
+                "见 references/jrbx.md「多账号轮换」"
+            )
         if code in FATAL_CODES:
+            if self._retire("auth_failed", f"code={code} {FATAL_CODES[code]}"):
+                return self.post(path, body)
             raise JrbxAuthError(f"睿销登录态失效（code={code}）：{FATAL_CODES[code]}")
-        if code == RATE_LIMIT_CODE and retry_on_rate_limit > 0:
-            time.sleep(max(3.0, self.delay * 3))
-            return self.post(path, body, retry_on_rate_limit - 1)
         return code, document.get("content")
 
     def search(self, terms, start, end, page, page_size, notice_types):
@@ -592,18 +751,20 @@ def normalize_attachments(value):
 
 
 def passes_prefilter(item, detail=None):
-    """目标品类预筛：硬排除优先，其次要求至少一个目标品类信号。"""
+    """目标品类预筛，返回 search_common.screen_domain 的结果 dict。
+
+    标题域只放标题：`product` 是把公告里全部标的拉平成的一串，属于清单，和正文
+    同级——睿销会把「全自动体外过敏原筛查系统及其配套试剂」和「梯度pcr」并列写进
+    这一个字段，按标题域处理就会连坐（screen_domain 的注释有实测数）。
+    """
     detail = detail or {}
-    text = "\n".join((
-        compact_text(item.get("title")),
+    body_text = "\n".join((
         compact_text(item.get("product")),
         compact_text(item.get("titleProduct")),
         html_to_text(detail.get("simpleContent")),
         html_to_text(detail.get("content")),
     ))
-    if excluded_domain_term(text):
-        return False
-    return bool(target_category_signals(text))
+    return screen_domain(compact_text(item.get("title")), body_text)
 
 
 def article_url(item, detail=None):
@@ -718,6 +879,9 @@ def build_candidate(item, detail, origin_url, hits, all_terms):
         "link_kind": link_kind,
         "rank_score": item.get("score"),
         "summary": summary,
+        # 睿销把公告里全部标的拉平成一串。正文写「详见附件」「下载」时，这是唯一
+        # 能定品类的字段，必须随候选落盘给统一层和核实阶段看。
+        "product_list": compact_text(item.get("product")),
         "content": content,
         "source_fields": fields,
         "field_evidence": evidence,
@@ -781,12 +945,23 @@ def collect(client, queries, start, end, page_size=100, max_pages_per_query=20,
 
     all_terms = sorted({term for query in queries for term in split_terms(query)})
     # 先用列表元数据粗筛，再取正文复筛：正文不计配额，但省下的请求同样降低被限频的概率。
-    shortlisted = [
-        (notice_id, slot) for notice_id, slot in by_notice.items()
-        if passes_prefilter(slot["item"])
-    ]
+    # 预筛丢弃必须留痕：2026-09-04 之前这里静默丢弃，两天窗口吞掉 11 条有目标品类
+    # 信号的公告，只能靠人工比对才发现。丢弃明细写进 search_summary.json。
+    prefilter_dropped = []
+    shortlisted = []
+    for notice_id, slot in by_notice.items():
+        screen = passes_prefilter(slot["item"])
+        if screen["keep"]:
+            shortlisted.append((notice_id, slot))
+        else:
+            prefilter_dropped.append({
+                "notice_id": notice_id,
+                "stage": "listing",
+                "title": compact_text(slot["item"].get("title"))[:120],
+                "reason": screen["reason"],
+            })
     shortlisted.sort(key=lambda row: int(row[1]["item"].get("publishTime") or 0), reverse=True)
-    prefilter_excluded = len(by_notice) - len(shortlisted)
+    prefilter_excluded = len(prefilter_dropped)
 
     detailed = []
     for notice_id, slot in shortlisted:
@@ -797,8 +972,22 @@ def collect(client, queries, start, end, page_size=100, max_pages_per_query=20,
         except JrbxError as exc:
             failures.append({"notice_id": notice_id, "stage": "detail", "error": str(exc)})
             continue
-        if detail is None or not passes_prefilter(slot["item"], detail):
+        if detail is None:
             prefilter_excluded += 1
+            prefilter_dropped.append({
+                "notice_id": notice_id, "stage": "detail",
+                "title": compact_text(slot["item"].get("title"))[:120],
+                "reason": "详情接口未返回正文",
+            })
+            continue
+        screen = passes_prefilter(slot["item"], detail)
+        if not screen["keep"]:
+            prefilter_excluded += 1
+            prefilter_dropped.append({
+                "notice_id": notice_id, "stage": "detail",
+                "title": compact_text(slot["item"].get("title"))[:120],
+                "reason": screen["reason"],
+            })
             continue
         detailed.append((notice_id, slot, detail))
 
@@ -831,6 +1020,7 @@ def collect(client, queries, start, end, page_size=100, max_pages_per_query=20,
         "raw_result_count": raw_count,
         "unique_notice_count": len(by_notice),
         "prefilter_excluded": prefilter_excluded,
+        "prefilter_dropped": prefilter_dropped,
         "detail_fetched": len(detailed),
         "origin_lookups": origin_lookups,
         "origin_quota_exhausted": quota_exhausted,
@@ -851,7 +1041,22 @@ def main():
     parser.add_argument("--queries", help="逗号分隔的 Query；默认读取 references/jrbx.md")
     parser.add_argument("--time-range", default="72h", help="72h / 3d / YYYY-MM-DD..YYYY-MM-DD")
     parser.add_argument("--out-dir", help="输出目录；默认 .tmp/search/<日期>/.sources/jrbx")
-    parser.add_argument("--delay", type=float, default=1.2, help="请求间隔秒数，默认1.2（有频控）")
+    parser.add_argument(
+        "--delay", type=float, default=1.2,
+        help="请求间隔下限秒数，默认1.2；实际间隔再叠加 --delay-jitter 的随机抖动",
+    )
+    parser.add_argument(
+        "--delay-jitter", type=float, default=1.8,
+        help="叠加在 --delay 之上的随机抖动上限秒数，默认1.8（实际间隔 1.2~3.0s）；0 表示等距发包",
+    )
+    parser.add_argument(
+        "--pause-every", type=int, default=25,
+        help="每发多少次请求插一次长停顿，默认25；0 表示关闭",
+    )
+    parser.add_argument(
+        "--pause-seconds", type=float, default=20.0,
+        help="长停顿基准秒数，实际按 ±50%% 随机，默认20",
+    )
     parser.add_argument("--page-size", type=int, default=100)
     parser.add_argument("--max-pages-per-query", type=int, default=20)
     parser.add_argument(
@@ -892,28 +1097,32 @@ def main():
                 )
             credentials = credentials_from_user_info(sys.stdin.read())
             path = write_credentials_file(credentials)
+            pool = read_credential_pool_file(path)
             expires = token_expires_at(credentials["token"])
             report = {
                 "written": str(path),
-                "userId": credentials["userId"][:4] + "…",
+                "userId": mask_user_id(credentials["userId"]),
                 "expires_at": expires.isoformat(timespec="seconds") if expires else None,
                 "days_left": (expires - datetime.now()).days if expires else None,
+                "account_count": len(pool),
+                "accounts": [mask_user_id(account["userId"]) for account in pool],
             }
             print(json.dumps(report, ensure_ascii=False, indent=2))
             print(
-                f"已写入 {path}（该文件在 .gitignore 中，禁止提交或外发）",
+                f"已写入 {path}，账号池现有 {len(pool)} 个账号"
+                f"（该文件在 .gitignore 中，禁止提交或外发）",
                 file=sys.stderr,
             )
             return 0
 
         if args.probe_keyword_syntax:
-            report = probe_keyword_syntax(load_credentials())
+            report = probe_keyword_syntax(load_credential_pool())
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0
 
         if args.check_token:
-            report = check_token(
-                load_credentials(), warn_days=args.warn_days, probe=not args.offline
+            report = check_credential_pool(
+                load_credential_pool(), warn_days=args.warn_days, probe=not args.offline
             )
             print(json.dumps(report, ensure_ascii=False, indent=2))
             exit_code = CHECK_TOKEN_EXIT_CODES.get(report["status"], 2)
@@ -936,6 +1145,8 @@ def main():
             raise JrbxError("--max-pages-per-query 必须大于0")
         if args.max_origin_lookups < 0:
             raise JrbxError("--max-origin-lookups 不能为负")
+        if args.delay_jitter < 0 or args.pause_every < 0 or args.pause_seconds < 0:
+            raise JrbxError("--delay-jitter / --pause-every / --pause-seconds 都不能为负")
         notice_types = [code.strip() for code in args.notice_types.split(",") if code.strip()]
 
         if args.dry_run:
@@ -951,6 +1162,12 @@ def main():
                 "start": start.isoformat(timespec="seconds"),
                 "end": end.isoformat(timespec="seconds"),
                 "max_origin_lookups": args.max_origin_lookups,
+                "pacing": {
+                    "delay": args.delay,
+                    "delay_jitter": args.delay_jitter,
+                    "pause_every": args.pause_every,
+                    "pause_seconds": args.pause_seconds,
+                },
                 "authentication": "user_token_from_env",
                 "credentials_present": all(
                     os.environ.get(name) for name in ("JRBX_USER_ID", "JRBX_TOKEN", "JRBX_OPENID")
@@ -958,15 +1175,32 @@ def main():
             }, ensure_ascii=False, indent=2))
             return 0
 
-        credentials = load_credentials()
-        expires_at = token_expires_at(credentials["token"])
+        # 已过期的账号先在本地筛掉：JWT 的 exp 是离线可判的，没必要拿一次请求去撞。
+        pool = []
+        expiries = []
+        for account in load_credential_pool():
+            expires_at = token_expires_at(account["token"])
+            if expires_at and expires_at <= datetime.now():
+                print(
+                    f"警告：睿销账号 {mask_user_id(account['userId'])} 的 token 已于 "
+                    f"{expires_at:%Y-%m-%d %H:%M} 过期，本次跳过，请重新扫码换发",
+                    file=sys.stderr,
+                )
+                continue
+            pool.append(account)
+            if expires_at:
+                expiries.append(expires_at)
+        if not pool:
+            raise JrbxAuthError(
+                "睿销账号池里没有未过期的 token，需重新扫码登录；用 --check-token 查明细"
+            )
+        # 到期预警按池里最早到期的那个报——它决定了下一次必须去扫码的时间。
+        expires_at = min(expiries) if expiries else None
         if expires_at:
             remaining = expires_at - datetime.now()
-            if remaining.total_seconds() <= 0:
-                raise JrbxAuthError(f"睿销 token 已于 {expires_at:%Y-%m-%d %H:%M} 过期，需重新扫码登录")
             if remaining.days <= 3:
                 print(
-                    f"警告：睿销 token 将于 {expires_at:%Y-%m-%d %H:%M} 过期"
+                    f"警告：睿销账号池中最早的 token 将于 {expires_at:%Y-%m-%d %H:%M} 过期"
                     f"（剩余 {remaining.days} 天），请及时重新扫码",
                     file=sys.stderr,
                 )
@@ -977,7 +1211,10 @@ def main():
         )
         out_dir.mkdir(parents=True, exist_ok=True)
         started = time.time()
-        client = JrbxClient(credentials, delay=args.delay)
+        client = JrbxClient(
+            pool, delay=args.delay, jitter=args.delay_jitter,
+            pause_every=args.pause_every, pause_seconds=args.pause_seconds,
+        )
         candidates, failures, stats = collect(
             client, queries, start, end,
             page_size=args.page_size,
@@ -997,6 +1234,9 @@ def main():
             "request_count": client.request_count,
             "candidate_count": len(index),
             "failures": failures,
+            "account_count": len(client.pool),
+            # 只留 userId 前四位：三字段都是登录态，摘要会进候选目录，不能落明文。
+            "accounts_retired": client.retired,
         }
         summary.update(stats)
         if expires_at:
@@ -1013,6 +1253,15 @@ def main():
             f"无可用链接丢弃 {stats['dropped_no_url']} 条，"
             f"失败 {len(failures)} 项，耗时 {time.time() - started:.1f}s"
         )
+        if client.retired:
+            # 退池不是“今天没情报”，是账号在缩水；无人值守时必须喊出来。
+            print(
+                "警告：本次有 " + str(len(client.retired)) + " 个睿销账号退池（"
+                + "、".join(f"{row['user_id']} {row['reason']}" for row in client.retired)
+                + f"），池中剩余 {len(client.pool) - len(client.retired)} 个；"
+                "被判频控（1403）的账号实测即废，请重新扫码换发后用 --set-token 覆盖",
+                file=sys.stderr,
+            )
         if stats["fallback_article_url_count"]:
             print(
                 f"提示：{stats['fallback_article_url_count']} 条候选使用睿销主站正文链接"
@@ -1021,6 +1270,10 @@ def main():
             )
         print(f"落盘：{out_dir}")
         return 0 if candidates or not failures else 2
+    except JrbxRateLimitError as exc:
+        # 与“需重新扫码”分开：定时任务据此判断是该换号还是该把节流参数调松。
+        print(f"睿销频控：{exc}", file=sys.stderr)
+        return 5
     except JrbxAuthError as exc:
         # 登录态问题必须以独立退出码暴露，不能被当成“今天没有新公告”。
         print(f"睿销登录态错误：{exc}", file=sys.stderr)

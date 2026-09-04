@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,16 +15,22 @@ from jrbx_search import (  # noqa: E402
     ACTIONABLE_NOTICE_TYPES,
     CHECK_TOKEN_EXIT_CODES,
     JrbxAuthError,
+    JrbxClient,
     JrbxError,
+    JrbxRateLimitError,
     article_url,
+    check_credential_pool,
     check_token,
     build_candidate,
     collect,
     credentials_from_user_info,
+    load_credential_pool,
     load_credentials,
+    mask_user_id,
     parse_queries,
     parse_time_range,
     passes_prefilter,
+    read_credential_pool_file,
     split_terms,
     to_millis,
     token_expires_at,
@@ -227,16 +234,34 @@ class CredentialTests(unittest.TestCase):
 
 
 class PrefilterTests(unittest.TestCase):
-    def test_target_category_passes(self):
-        self.assertTrue(passes_prefilter(sample_item()))
+    """passes_prefilter 返回 screen_domain 的结果 dict，不是 bool。"""
 
-    def test_excluded_category_is_rejected_even_with_target_signal(self):
+    def test_target_category_passes(self):
+        self.assertTrue(passes_prefilter(sample_item())["keep"])
+
+    def test_excluded_category_in_title_is_rejected(self):
         item = sample_item(title="过敏原检测试剂及酶标仪采购", product="酶标仪")
-        self.assertFalse(passes_prefilter(item))
+        screen = passes_prefilter(item)
+        self.assertFalse(screen["keep"])
+        self.assertIn("酶标仪", screen["reason"])
+
+    def test_exclude_term_only_in_product_list_keeps_candidate(self):
+        """`product` 是清单，属正文域：混合包不再被里面的一台 PCR 仪带走。
+
+        原型是 2026-09-04 实跑漏掉的甘肃省妇幼保健院第十九批（screen_domain）。
+        """
+        item = sample_item(
+            title="2026年甘肃省妇幼保健院医疗设备及相关服务第十九批采购项目招标公告",
+            product="全自动体外过敏原筛查系统及其配套试剂(二次),梯度pcr,手术放大镜",
+            titleProduct="",
+        )
+        screen = passes_prefilter(item)
+        self.assertTrue(screen["keep"])
+        self.assertEqual(screen["body_exclude_term"].lower(), "pcr")
 
     def test_unrelated_notice_is_rejected(self):
         item = sample_item(title="办公楼物业管理服务采购", product="物业服务", titleProduct="")
-        self.assertFalse(passes_prefilter(item))
+        self.assertFalse(passes_prefilter(item)["keep"])
 
 
 class CandidateTests(unittest.TestCase):
@@ -521,6 +546,251 @@ class CheckTokenTests(unittest.TestCase):
         self.assertEqual(report["status"], "unknown_expiry")
         self.assertTrue(report["server_accepted"])
         self.assertEqual(CHECK_TOKEN_EXIT_CODES[report["status"]], 0)
+
+
+POOL = [
+    {"userId": "USER-1", "token": "T1", "openid": "O1"},
+    {"userId": "USER-2", "token": "T2", "openid": "O2"},
+]
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self._raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    def read(self, size):
+        return self._raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class RecordingTransport:
+    """按「第几次请求」回放返回码，并记下每次实际用的是哪个 token。"""
+
+    def __init__(self, codes):
+        self.codes = list(codes)
+        self.tokens = []
+
+    def __call__(self, request, timeout=None):
+        self.tokens.append(json.loads(request.data.decode("utf-8"))["token"])
+        position = len(self.tokens) - 1
+        code = self.codes[position] if position < len(self.codes) else "00"
+        return FakeResponse({"code": code, "content": {"items": [], "totalPage": 0, "totalCount": 0}})
+
+
+class PoolProbe:
+    """--check-token 的池级探测桩：按 userId 决定该账号探测时抛什么。"""
+
+    def __init__(self, errors=None):
+        self.errors = dict(errors or {})
+        self.calls = []
+
+    def __call__(self, credentials, delay=0.0):
+        self.credentials = credentials
+        return self
+
+    def search(self, *args, **kwargs):
+        self.calls.append(self.credentials["userId"])
+        error = self.errors.get(self.credentials["userId"])
+        if error:
+            raise error
+        return {"items": [], "totalPage": 0, "totalCount": 0}
+
+
+class CredentialPoolTests(unittest.TestCase):
+    def test_accounts_array_is_read_in_order(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "jrbx.json"
+            path.write_text(json.dumps({"accounts": POOL}), encoding="utf-8")
+            self.assertEqual(read_credential_pool_file(path), POOL)
+            self.assertEqual(load_credential_pool({}, path=path), POOL)
+
+    def test_legacy_flat_file_still_loads_as_a_single_account(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "jrbx.json"
+            path.write_text(json.dumps(POOL[0]), encoding="utf-8")
+            self.assertEqual(load_credential_pool({}, path=path), [POOL[0]])
+
+    def test_incomplete_and_duplicate_accounts_are_dropped(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "jrbx.json"
+            path.write_text(json.dumps({"accounts": [
+                POOL[0], {"userId": "USER-3", "token": ""}, POOL[0], POOL[1],
+            ]}), encoding="utf-8")
+            self.assertEqual(read_credential_pool_file(path), POOL)
+
+    def test_environment_expresses_exactly_one_account_and_still_wins(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "jrbx.json"
+            path.write_text(json.dumps({"accounts": POOL}), encoding="utf-8")
+            env = {"JRBX_USER_ID": "E1", "JRBX_TOKEN": "E2", "JRBX_OPENID": "E3"}
+            self.assertEqual(
+                load_credential_pool(env, path=path),
+                [{"userId": "E1", "token": "E2", "openid": "E3"}],
+            )
+
+    def test_set_token_appends_a_new_account_and_keeps_rotation_order(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "jrbx.json"
+            write_credentials_file(POOL[0], path)
+            write_credentials_file(POOL[1], path)
+            self.assertEqual(read_credential_pool_file(path), POOL)
+
+    def test_rescanning_the_same_account_replaces_it_in_place(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "jrbx.json"
+            write_credentials_file(POOL[0], path)
+            write_credentials_file(POOL[1], path)
+            write_credentials_file({"userId": "USER-1", "token": "T1b", "openid": "O1b"}, path)
+            pool = read_credential_pool_file(path)
+            self.assertEqual([account["userId"] for account in pool], ["USER-1", "USER-2"])
+            self.assertEqual(pool[0]["token"], "T1b")
+
+
+class RotationTests(unittest.TestCase):
+    """1403 实测触发即废：不重试，换号原地重发同一请求。"""
+
+    def client(self, codes, pool=None, **kwargs):
+        transport = RecordingTransport(codes)
+        client = JrbxClient(pool or POOL, delay=0.0, **kwargs)
+        return client, transport
+
+    def test_rate_limit_switches_account_and_replays_the_same_request(self):
+        client, transport = self.client(["1403", "00"])
+        with mock.patch("jrbx_search.urlopen", transport):
+            code, _ = client.post("/x", {"pageNum": 7})
+        self.assertEqual(code, "00")
+        # 同一个请求体，先后用两个账号各发一次：不丢步、不重跑
+        self.assertEqual(transport.tokens, ["T1", "T2"])
+        self.assertEqual(len(client.retired), 1)
+        self.assertEqual(client.retired[0]["reason"], "rate_limited")
+
+    def test_the_rate_limited_account_is_never_retried(self):
+        client, transport = self.client(["1403", "00", "00"])
+        with mock.patch("jrbx_search.urlopen", transport):
+            client.post("/x", {})
+            client.post("/y", {})
+        self.assertEqual(transport.tokens.count("T1"), 1)
+        self.assertEqual(transport.tokens, ["T1", "T2", "T2"])
+
+    def test_exhausting_the_pool_raises_a_dedicated_rate_limit_error(self):
+        client, transport = self.client(["1403", "1403"])
+        with mock.patch("jrbx_search.urlopen", transport):
+            with self.assertRaises(JrbxRateLimitError):
+                client.post("/x", {})
+        self.assertEqual(transport.tokens, ["T1", "T2"])
+        self.assertEqual(len(client.retired), 2)
+
+    def test_rate_limit_aborts_collect_instead_of_being_logged_as_one_failed_query(self):
+        # collect_listings 对普通 JrbxError 是「记一笔、换下一条 query 接着打」；
+        # 池空之后再打就是往枪口上撞，必须一路抛穿到 main。
+        class ExhaustedClient:
+            request_count = 0
+
+            def search(self, *args, **kwargs):
+                raise JrbxRateLimitError("池空")
+
+        with self.assertRaises(JrbxRateLimitError):
+            collect(
+                ExhaustedClient(), ["过敏", "自身抗体"],
+                datetime(2026, 9, 1), datetime(2026, 9, 3),
+            )
+
+    def test_dead_login_state_also_rotates_before_giving_up(self):
+        client, transport = self.client(["05", "00"])
+        with mock.patch("jrbx_search.urlopen", transport):
+            code, _ = client.post("/x", {})
+        self.assertEqual(code, "00")
+        self.assertEqual(client.retired[0]["reason"], "auth_failed")
+
+    def test_single_account_pool_fails_exactly_as_before(self):
+        client, transport = self.client(["05"], pool=[POOL[0]])
+        with mock.patch("jrbx_search.urlopen", transport):
+            with self.assertRaises(JrbxAuthError):
+                client.post("/x", {})
+        self.assertEqual(transport.tokens, ["T1"])
+
+    def test_retired_rows_never_carry_the_credentials(self):
+        client, transport = self.client(["1403", "1403"])
+        with mock.patch("jrbx_search.urlopen", transport):
+            with self.assertRaises(JrbxRateLimitError):
+                client.post("/x", {})
+        dumped = json.dumps(client.retired, ensure_ascii=False)
+        for secret in ("T1", "T2", "O1", "O2", "USER-1", "USER-2"):
+            self.assertNotIn(secret, dumped)
+        self.assertEqual(client.retired[0]["user_id"], mask_user_id("USER-1"))
+
+
+class PacingTests(unittest.TestCase):
+    """固定间隔是明确的机器指纹，而 1403 一撞账号就废——宁可慢也别撞。"""
+
+    def test_gap_is_jittered_around_the_floor(self):
+        client = JrbxClient(POOL, delay=1.2, jitter=1.8, pause_every=0)
+        gaps = {round(client._next_gap(), 4) for _ in range(200)}
+        self.assertTrue(all(1.2 <= gap <= 3.0 for gap in gaps))
+        self.assertGreater(len(gaps), 100, "间隔没有真正抖动")
+
+    def test_a_long_pause_lands_every_pause_every_requests(self):
+        client = JrbxClient(POOL, delay=1.2, jitter=1.8, pause_every=25, pause_seconds=20.0)
+        client.request_count = 25
+        self.assertTrue(15.0 <= client._next_gap() <= 30.0)
+        client.request_count = 26
+        self.assertTrue(1.2 <= client._next_gap() <= 3.0)
+
+    def test_the_first_request_is_never_paused(self):
+        client = JrbxClient(POOL, delay=1.2, pause_every=25, pause_seconds=20.0)
+        self.assertTrue(1.2 <= client._next_gap() <= 3.0)
+
+    def test_zero_delay_disables_jitter_and_pauses_for_probes(self):
+        # --check-token 只发一次最小检索，不该被节流拖住。
+        client = JrbxClient(POOL, delay=0.0)
+        client.request_count = 25
+        self.assertEqual(client._next_gap(), 0.0)
+
+
+class PoolCheckTests(unittest.TestCase):
+    def test_rate_limited_account_is_reported_as_needing_a_rescan(self):
+        probe = ProbeClient(error=JrbxRateLimitError("池空"))
+        report = check_token(credentials_expiring_in(19), client_factory=probe)
+        self.assertEqual(report["status"], "rate_limited")
+        self.assertFalse(report["server_accepted"])
+        self.assertEqual(CHECK_TOKEN_EXIT_CODES[report["status"]], 3)
+
+    def test_pool_status_follows_the_healthiest_account(self):
+        pool = [
+            {"userId": "USER-1", "token": jwt_expiring_in(19), "openid": "O1"},
+            {"userId": "USER-2", "token": jwt_expiring_in(19), "openid": "O2"},
+        ]
+        probe = PoolProbe({"USER-1": JrbxRateLimitError("废了")})
+        report = check_credential_pool(pool, client_factory=probe)
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(CHECK_TOKEN_EXIT_CODES[report["status"]], 0)
+        self.assertEqual(report["account_count"], 2)
+        self.assertEqual(report["usable_account_count"], 1)
+        # 还能跑，但缩水的那个必须点名，否则池会悄悄耗光
+        self.assertIn("rate_limited", report["message"])
+        self.assertIn(mask_user_id("USER-1"), report["message"])
+
+    def test_pool_with_no_usable_account_demands_a_rescan(self):
+        pool = [
+            {"userId": "USER-1", "token": jwt_expiring_in(19), "openid": "O1"},
+            {"userId": "USER-2", "token": jwt_expiring_in(-1), "openid": "O2"},
+        ]
+        probe = PoolProbe({"USER-1": JrbxRateLimitError("废了")})
+        report = check_credential_pool(pool, client_factory=probe)
+        self.assertEqual(CHECK_TOKEN_EXIT_CODES[report["status"]], 3)
+        self.assertEqual(report["usable_account_count"], 0)
+
+    def test_pool_reports_masked_user_ids_only(self):
+        pool = [{"userId": "USER-1", "token": jwt_expiring_in(19), "openid": "O1"}]
+        report = check_credential_pool(pool, client_factory=PoolProbe())
+        dumped = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn("USER-1", dumped)
+        self.assertNotIn("O1", dumped)
 
 
 class NoticeTypeTests(unittest.TestCase):

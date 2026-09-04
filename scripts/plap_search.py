@@ -27,7 +27,7 @@ from urllib.request import Request, urlopen
 from search_common import (
     canonical_url,
     compact_text,
-    excluded_domain_term,
+    screen_domain,
     extract_project_id,
     target_category_signals,
     write_candidates,
@@ -238,11 +238,11 @@ def notice_type_name(code):
 
 
 def matched_target_terms(text):
-    """命中的共用目标品类信号。硬排除优先——即使同时含目标信号也返回空。"""
-    text = text or ""
-    if excluded_domain_term(text):
-        return []
-    return target_category_signals(text)
+    """命中的共用目标品类信号，只做归因。
+
+    去留由 screen_row 决定，这里不再自带硬排除：调用点都在 screen_row 放行之后。
+    """
+    return target_category_signals(text or "")
 
 
 def province_short(region):
@@ -355,13 +355,15 @@ def screen_row(row):
 
     PLAP 只能按标题检索，词表必须宽，因此这一层的丢弃率天然很高。把丢弃原因分开
     计数，才能判断某个宽词是在贡献召回还是纯粹在刷量。
+
+    硬排除只看标题——公开正文里的一台 PCR 仪不该带走整条公告，理由与实测数见
+    search_common.screen_domain。
     """
-    text = row_search_text(row)
-    excluded = excluded_domain_term(text)
-    if excluded:
-        return False, f"硬排除:{excluded}"
-    if not target_category_signals(text):
-        return False, "无目标品类信号"
+    screen = screen_domain(compact_text(row.get("title")), row_search_text(row))
+    if not screen["keep"]:
+        reason = ("硬排除:" + screen["reason"].split("：")[-1]
+                  if "硬排除词" in screen["reason"] else "无目标品类信号")
+        return False, reason
     return True, ""
 
 
