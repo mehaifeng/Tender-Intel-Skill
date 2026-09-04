@@ -7,7 +7,9 @@ screening, pushing, or `data/seen.json`.
 
 - branch: `feat/rewrite-keyword-tables`
 - tests: 159 pass (`python -m unittest discover -s tests`)
-- committed and pushed on `feat/rewrite-keyword-tables`. See §5.
+- committed on `feat/rewrite-keyword-tables` as `c57ea22`. **Not pushed** —
+  `git push` was denied by the sandbox permission classifier; the user must run
+  it (or grant the permission). Branch is 1 ahead of origin. See §5.
 - pushes made this session: 3 (all HTTP 200 + feishu `code: 0`, receipts recorded,
   `data/seen.json` 78 -> 81, then 81 -> 387 by the Feishu CSV import, see §4.1)
 
@@ -259,8 +261,9 @@ jrbx login to open. Expected behaviour; resets daily.
 
 ## 5. WHAT WENT INTO THE COMMIT
 
-Committed together on `feat/rewrite-keyword-tables` after the user confirmed the
-pre-existing working-tree changes do not conflict with this fix.
+Committed together on `feat/rewrite-keyword-tables` as `c57ea22`, after confirming
+the pre-existing working-tree changes do not conflict with this fix. The push to
+`origin` was blocked by the sandbox permission classifier and is still pending.
 
 Two independent workstreams share the commit:
 
