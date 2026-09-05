@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from zlbx_search import (  # noqa: E402
+    plan_batches,
+    window_days,
     DEFAULT_BID_PROCESS,
     MATCH_MODES,
     MAX_PAGE_SIZE,
@@ -241,3 +243,46 @@ class QueryAttributionTests(unittest.TestCase):
             [{"source": "zlbx", "query_number": 1, "query": "过敏"},
              {"source": "zlbx", "query_number": 4, "query": "IgE"}],
         )
+
+
+class BatchPlanningTests(unittest.TestCase):
+    """装箱降低「发现成本」：自适应切半正确但要先打一枪才知道该不该切。
+
+    2026-09-05 同口径实测（5 天窗口、只跑列表）：纯自适应 50 次调用，
+    拿实测命中数预先装箱只要 27 次，多出来的 23 次全是探路。
+    """
+
+    def test_no_history_falls_back_to_flat_batches(self):
+        groups = plan_batches(list("abcde"), {}, days=1, page_size=50, batch_size=8)
+        self.assertEqual([sorted(g) for g in groups], [list("abcde")])
+
+    def test_wide_keyword_gets_its_own_group(self):
+        groups = plan_batches(list("abcde"), {"a": 100}, days=1, page_size=50, batch_size=8)
+        self.assertIn(["a"], groups)
+        self.assertTrue(any(set(g) == set("bcde") for g in groups))
+
+    def test_window_length_shrinks_batches(self):
+        counts = {q: 20 for q in "abcde"}
+        one_day = plan_batches(list("abcde"), counts, days=1, page_size=50, batch_size=8)
+        five_day = plan_batches(list("abcde"), counts, days=5, page_size=50, batch_size=8)
+        self.assertLess(len(one_day), len(five_day))
+
+    def test_packed_groups_stay_within_one_page(self):
+        """OR 的 total 不会超过各词命中数之和，所以按和装箱是保守的。"""
+        counts = {"a": 30, "b": 12, "c": 8, "d": 3, "e": 1}
+        groups = plan_batches(list("abcde"), counts, days=1, page_size=50, batch_size=8)
+        for group in groups:
+            if len(group) > 1:
+                self.assertLessEqual(sum(counts[q] for q in group), 45)
+
+    def test_window_days_is_inclusive(self):
+        from datetime import datetime
+        self.assertEqual(window_days(datetime(2026, 9, 3), datetime(2026, 9, 5)), 3)
+        self.assertEqual(window_days(datetime(2026, 9, 5), datetime(2026, 9, 5)), 1)
+
+    def test_single_word_query_totals_are_recorded_for_next_run(self):
+        client = FakeClient({"过敏": docs("g", 7)})
+        stats = {"empty_batches": 0, "split_batches": 0, "paged_queries": 0}
+        collect_listings(client, ["过敏"], _t(), _t(), 8, MAX_PAGE_SIZE, stats,
+                         counts={"过敏": 7}, days=1)
+        self.assertEqual(stats["observed_hit_counts"], {"过敏": 7.0})

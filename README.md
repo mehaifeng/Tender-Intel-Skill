@@ -37,7 +37,7 @@
 
 开箱包已经包含本地`config/webhook.json`，可以直接运行。该文件含凭据，已被Git忽略，请勿公开分享。
 
-知了标讯 API Key 按环境变量`ZLBX_API_KEY` → `config/zlbx.json`的`api_key`顺序读取，模板见`config/zlbx.example.json`；该文件含凭据，已被Git忽略。Key没有到期机制，不需要定期换发。检索按调用次数计费，72h日窗一轮约24积分（列表）加通过预筛的候选每条1积分（详情），实测明细见`references/zlbx.md`。Webhook按环境变量`FEISHU_WEBHOOK_URL` → 旧环境变量`FEISHU_CREATE_WEBHOOK_URL` → `config/webhook.json`的顺序读取。
+知了标讯 API Key 按环境变量`ZLBX_API_KEY` → `config/zlbx.json`的`api_key`顺序读取，模板见`config/zlbx.example.json`；该文件含凭据，已被Git忽略。Key没有到期机制，不需要定期换发。检索按调用次数计费，72h日窗一轮约27积分（列表）加通过预筛的候选每条1积分（详情），约¥132/月，实测明细见`references/zlbx.md`。适配器把每词命中数记在`data/query_hits.json`用于装箱降低调用次数，首次运行没有该文件时会多花约一倍列表调用。Webhook按环境变量`FEISHU_WEBHOOK_URL` → 旧环境变量`FEISHU_CREATE_WEBHOOK_URL` → `config/webhook.json`的顺序读取。
 
 ## 运行
 

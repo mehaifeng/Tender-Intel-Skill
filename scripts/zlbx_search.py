@@ -28,6 +28,8 @@ from search_common import (
 ROOT = Path(__file__).resolve().parent.parent
 REFERENCE_FILE = ROOT / "references" / "keywords.md"
 CONFIG_FILE = ROOT / "config" / "zlbx.json"
+# 每词每天命中数，由适配器自己维护，用于装箱降低调用次数（见 plan_batches）。
+HIT_COUNTS_FILE = ROOT / "data" / "query_hits.json"
 BASE_URL = "https://mcp-server.zhiliaobiaoxun.com/api_v2"
 
 # 可行动阶段：采购意向 / 预招标 / 招标 / 变更公告。
@@ -321,8 +323,73 @@ def search_batch(client, keywords, start, end, page, page_size):
     return data.get("items") or [], int(data.get("total") or 0)
 
 
-def collect_listings(client, queries, start, end, batch_size, page_size, stats):
-    """自适应分批：命中数超过单页就把这批切半重跑，绝不深翻页。
+def load_hit_counts():
+    """上次跑出来的「每词每天命中数」。文件缺失或损坏都退回空表，不影响检索。"""
+    if not HIT_COUNTS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(HIT_COUNTS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    counts = data.get("per_day") if isinstance(data, dict) else None
+    return {str(k): float(v) for k, v in counts.items()} if isinstance(counts, dict) else {}
+
+
+def save_hit_counts(observed_per_day):
+    """只覆盖本次真正单独查过的词，其余保留旧值——一次运行不会查遍所有词。"""
+    merged = load_hit_counts()
+    merged.update(observed_per_day)
+    HIT_COUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    HIT_COUNTS_FILE.write_text(
+        json.dumps({
+            "note": "每词每天命中数，供 plan_batches 装箱；由 zlbx_search 自动维护",
+            "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "per_day": {k: round(v, 2) for k, v in sorted(merged.items())},
+        }, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def plan_batches(queries, counts, days, page_size, batch_size):
+    """按已知命中数装箱，让每批的预期命中落在单页以内。
+
+    自适应切半能保证正确性，但**发现成本很高**：它对每个词一无所知，只能先打一枪看
+    `total` 再决定切不切。2026-09-05 同口径实测（5 天窗口、只跑列表），自适应 50 次
+    调用，而拿实测命中数预先装箱只要 27 次——多出来的 23 次全是探路。
+
+    适配器每跑一次都会产出这份数据（见 collect_listings 的 observed），存下来下次直接用。
+    没有历史数据的词按 `batch_size` 均摊估一个保守权重，装错了仍由切半兜底。
+
+    OR 的命中数不是各词命中数之和（同一条公告会被多个词命中），所以按和装箱是保守的：
+    实际 total 只会更小，不会更大。
+    """
+    cap = max(1, int(page_size * 0.9))          # 留一成余量，避免刚好压线
+    weights = {q: counts[q] * days for q in queries if q in counts}
+    # **没有历史数据的词不参与按重装箱**：它们没有可信的权重，硬给一个估值只会把
+    # 装箱结果推向两个极端。估大了每个词单独成组（首跑实测退化成 85 组 / 92 次调用），
+    # 估小了塞爆一批再靠切半兜底。改为按 batch_size 平铺，与无数据时的朴素分批一致，
+    # 跑完这一轮它们就有真实命中数了。
+    unknown = [q for q in queries if q not in counts]
+    wide = [q for q in queries if q in counts and weights[q] > cap]
+    known_small = sorted(
+        (q for q in queries if q in counts and weights[q] <= cap), key=lambda q: -weights[q]
+    )
+
+    bins = []
+    for query in known_small:                   # 首次适应递减
+        for group in bins:
+            if sum(weights[q] for q in group) + weights[query] <= cap:
+                group.append(query)
+                break
+        else:
+            bins.append([query])
+    chunks = [unknown[i:i + batch_size] for i in range(0, len(unknown), batch_size)]
+    return [[q] for q in wide] + bins + chunks
+
+
+def collect_listings(client, queries, start, end, batch_size, page_size, stats,
+                     counts=None, days=1):
+    """按已知命中数装箱，并对装错的批切半重跑；绝不深翻页。
 
     2026-09-05 实测，接口的排序没有稳定 tiebreaker：同一组词同一参数连打三次，
     `total` 恒为 324，但每次取回的 324 条里去重后只有 312~317 条——重复的文档
@@ -332,6 +399,7 @@ def collect_listings(client, queries, start, end, batch_size, page_size, stats):
     单个词自己就超过一页时无法再切，只能翻页并接受约 0.4% 的漂移。
     """
     found = {}
+    observed = {}
 
     def take(items):
         for item in items:
@@ -342,6 +410,9 @@ def collect_listings(client, queries, start, end, batch_size, page_size, stats):
     def run(keywords):
         items, total = search_batch(client, keywords, start, end, 1, page_size)
         take(items)
+        if len(keywords) == 1:
+            # 单词查询才能把命中数归因到具体的词，供下次装箱用。
+            observed[keywords[0]] = total / max(1, days)
         if total == 0:
             stats["empty_batches"] += 1
             return
@@ -366,8 +437,11 @@ def collect_listings(client, queries, start, end, batch_size, page_size, stats):
             taken += len(items)
             page += 1
 
-    for offset in range(0, len(queries), batch_size):
-        run(queries[offset:offset + batch_size])
+    groups = plan_batches(queries, counts or {}, days, page_size, batch_size)
+    stats["planned_groups"] = len(groups)
+    for group in groups:
+        run(group)
+    stats["observed_hit_counts"] = observed
     return found
 
 
@@ -449,9 +523,23 @@ def build_candidate(item, detail, query_hits):
     }
 
 
+def window_days(start, end):
+    """装箱权重按「每天命中数 × 天数」估，窗口越宽每批要装的词越少。"""
+    return max(1, (end.date() - start.date()).days + 1)
+
+
 def collect(client, queries, start, end, batch_size, page_size, max_details):
     stats = {"empty_batches": 0, "split_batches": 0, "paged_queries": 0}
-    listings = collect_listings(client, queries, start, end, batch_size, page_size, stats)
+    days = window_days(start, end)
+    listings = collect_listings(
+        client, queries, start, end, batch_size, page_size, stats,
+        counts=load_hit_counts(), days=days,
+    )
+    # 本次单独查过的词，命中数存回去供下次装箱；一次运行查不遍所有词，故为增量合并。
+    observed = stats.pop("observed_hit_counts", {})
+    if observed:
+        save_hit_counts(observed)
+    stats["hit_counts_learned"] = len(observed)
 
     # 命中归因：列表接口不回传是哪个词命中的，本地按标的物与标题回推，
     # 记成 (Query 编号, 词) 以满足候选契约。正文里才命中的词由统一层再补一次。
