@@ -96,6 +96,18 @@ python scripts/tender_pipeline.py record-push --run-dir <检索目录> --receipt
 
 其中项目编号、单位、地区、所属省/市、截止时间、预算、采购方式由管线从知了标讯的结构化字段直接绑定（`tender_pipeline.SOURCE_BOUND_FIELDS`），模型不需要提取；覆盖须带正文证据。
 
+## 打分发包
+
+    python3 scripts/build_package.py              # 含凭据，仅限本机部署
+    python3 scripts/build_package.py --no-secrets # 不含凭据，可外发
+
+输出到 `dist/`（已被 Git 忽略）。打包时会在包内跑 `--dry-run` 与全量测试自检，
+不通过就以非零码退出。含凭据的包里 `config/zlbx.json`、`config/webhook.json`
+是明文，**不要提交版本库、不要转发**。
+
+包里带上了 `data/query_hits.json`，所以部署后第一次运行就是热态（列表约 27 次调用），
+不用先花一轮冷启动的 50 次去探路。
+
 ## 依赖
 
 - Python 3.9+标准库；正常运行不需要Python第三方包
