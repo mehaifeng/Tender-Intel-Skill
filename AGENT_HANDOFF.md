@@ -1,337 +1,95 @@
-# AGENT HANDOFF — 2026-09-04
+# AGENT HANDOFF — 2026-09-05
 
-Machine-readable handoff. Not written for humans. Read fully before touching
-screening, pushing, or `data/seen.json`.
+机器可读交接。动检索层、字段绑定或 `data/seen.json` 之前先读完。
 
-## 0. STATE AT HANDOFF
+## 0. 本次变更
 
-- branch: `feat/rewrite-keyword-tables`
-- tests: 162 pass (`python -m unittest discover -s tests`)
-- committed on `feat/rewrite-keyword-tables` as `c57ea22`. **Not pushed** —
-  `git push` was denied by the sandbox permission classifier; the user must run
-  it (or grant the permission). Branch is 1 ahead of origin. See §5.
-- pushes made this session: 3 (all HTTP 200 + feishu `code: 0`, receipts recorded,
-  `data/seen.json` 78 -> 81, then 81 -> 387 by the Feishu CSV import (§4.1),
-  then -> 380 after the 2-month prune (§4.1b))
+分支 `feat/zlbx-single-source`。**搜索层整体换成知了标讯单信源**，删除 CCGP、PLAP、
+睿销（jrbx）三个适配器及其全部描述。测试 115 条全绿
+（`python -m unittest discover -s tests`）。
 
-## 1. WHAT WAS BROKEN
+删除：`scripts/{ccgp,plap,jrbx}_search.py`、`references/{ccgp,plap,jrbx}.md`、
+`tests/test_{ccgp,plap,jrbx}_search.py`、`config/jrbx.example.json`。
+新增：`scripts/zlbx_search.py`、`references/zlbx.md`、`tests/test_zlbx_search.py`、
+`config/zlbx.example.json`。
 
-Commit `817fe13` (2026-09-03) introduced `EXCLUDE_TERMS` hard exclusion evaluated
-over **title + summary + full body**:
+## 1. 为什么能换
+
+2026-09-02~09-04 用《招标信息跟踪档案》32 条人工台账做单信源召回实测：
+
+- 逐词检索召回 **27/32**，业务方标为「有效」的 13 条 **13/13 全中**；
+- 覆盖面含中国政府采购网、**军队采购网**、医院自建站、省级平台、**微信公众号**；
+- 3 条补不回来：阿克苏地区第三人民医院、南京鼓楼医院集团安庆市石化医院（库里完全
+  没有），中山七院（库里只有无品类信号的壳）。
+
+换掉的运维负担：睿销登录态 20 天固定窗口到期需微信重新扫码（每年约 18 次）、
+`1403` 撞上即废号、回源 URL 每天 10 次配额。代价是按调用计费，实跑约 ¥154/月。
+
+## 2. 三条最容易踩的接口行为
+
+全部实测，细节与复现数据见 `references/zlbx.md`。
+
+1. **必须显式传 `match_modes:['fulltext']`。** 默认 / `all` / `sm` 三者等价，
+   召回比全文低一个数量级（`过敏` 8 vs 116）。
+2. **分页不稳定。** 同一组词同一参数连打 3 次，`total` 恒为 324，但每次取回的
+   324 条里去重后只有 312~317 条，重复文档全部落在相邻页。所以适配器做**自适应
+   分批**：`total` 超过单页就把这批切半重跑，绝不深翻页。改 `collect_listings()`
+   前务必先读 `references/zlbx.md`「分页不稳定」。
+3. **`pub_time` 可能比实际发布日早一天**，检索窗口要比目标窗口多放一天。
+
+## 3. 管线精简
+
+`tender_pipeline.SOURCE_BOUND_FIELDS`（项目编号、单位、地区、所属省/市、截止时间、
+预算、采购方式）现在由管线**从接口结构化字段直接绑定**，模型不再提取。
+模型可以覆盖，但**必须给出该字段的正文证据**，否则覆盖不生效。
+
+模型在核实阶段只剩两件事：判产品域、补 `科室`。`references/verification.md` 与
+`SKILL.md` 已按这个口径重写。
+
+### 由此引入的一个坑，已修
+
+接口的 `caller_name` 与 `province`/`city` 可能分属不同主体——库里会收公众号推文这类
+「一篇覆盖多家医院」的内容。实测出现过 `单位=浙江省宁波市宁海县城关医院` 而
+`地区=广东省深圳市南山区`。地理由模型填的时候它会看出矛盾，直接绑定就不会。
+`canonicalize_create()` 因此加了一道：**采购人名字里的省份与接口省份矛盾时不绑定
+地理字段**，退回医院索引补。回归用例 `SourceFieldBindingTests`。
+
+误伤的是「北京大学深圳医院」这类跨省冠名，代价只是地理留空后交给索引，方向安全——
+填错省份会把消息发到错误大区，比留空危险得多。
+
+## 4. 端到端验证记录
+
+`--time-range 2026-09-03..2026-09-05`：
 
 ```
-search_text = title + summary + content
-if excluded_domain_term(search_text): drop      # ran BEFORE target-category match
-signals = target_category_signals(search_text)  # unreachable for those
+检索  77 次调用 / 77 积分（列表 38 + 详情 39），全库命中 363 → 候选 39 → 去重 37
+prepare  37 → 队列 24、已推送过 7、预筛丢弃 6
+submit   create 2 / exclude 22 / manual 0
+载荷     2 条，十六字段齐全、全字符串，send_webhook --dry-run 全部通过
 ```
 
-`EXCLUDE_TERMS` contains `核酸|PCR|测序|免疫组化|培养基|电泳|酶标仪|结核|畜牧|...`.
-A hospital equipment/reagent list of 40-90 line items almost always contains one
-PCR analyzer or one nucleic-acid kit. Result: **every mixed-bundle announcement
-containing our category was silently dropped** — and mixed bundles are the normal
-purchasing form for 过敏原/自免 systems.
+`已推送过 7` 说明跨运行去重在换源后仍然生效：历史台账里的链接来自旧信源，靠的是
+「标题指纹+发布时间+采购人」这条兜底键。
 
-Callers affected: `tender_pipeline.py` (unified layer, CCGP's only screen),
-`jrbx_search.passes_prefilter` (silent `return False`, no log),
-`plap_search.screen_row` / `matched_target_terms`.
+## 5. 待办
 
-### Measured damage, window 2026-09-03..2026-09-04
+### 5.1 成本还能降，暂未做
 
-Measurement method: monkeypatched `excluded_domain_term` to a no-op, re-ran
-`jrbx.collect` over the same window; CCGP measured offline from the saved source dir.
+- 详情调用占一半成本（39/77），其中一部分候选会在 `prepare` 的 `already_seen`
+  阶段被滤掉（本次 37 条里 7 条）。适配器拿不到台账，去重发生在它之后。
+  要省这笔钱得把 seen 的身份键前移到适配器，代价是耦合。
+- 每天用 72h 窗会把同一批公告重复取三次。收窄窗口能省钱，但会漏掉延迟收录的公告。
 
-| source | dropped-with-target-signal | of those, real candidates |
-| --- | --- | --- |
-| jrbx | 11 | 5 |
-| ccgp | 4 | 1 |
-| total | 15 | **6** |
+### 5.2 沿用上一版的未决项
 
-Same window actually pushed only 2. Missed > pushed by 3x.
+- `变应原皮肤点刺液` 是否属本司产品域，待业务方确认（体内诊断 vs 表里的体外诊断）。
+- `25羟基维生素D` 与 `细胞因子` 两行，一线连续反馈「公司无相关产品」，仍在表里，
+  已标为 `BROAD_SIGNAL_GROUPS`。业务方确认后可从 keywords.md 删行。
+- 院内遴选类公告常常只有报名截止、没有投标截止，`截止时间` 因此为 `null`。
+  接口的 `signup_time` 有值，但 schema 明确禁止用报名截止冒充投标截止，
+  当前写进摘要。要改得先和业务方确认字段语义。
 
-The 5 correct jrbx kills (结核 x2, 疾控核酸 x2, 科研培养基, 畜牧) are **all also
-caught by another gate** (title-scope exclude term / no target signal /
-non-hospital buyer). So body-scope hard exclusion was redundant except for the
-false kills.
+### 5.3 未迁移的东西
 
-Regression proof: `呼和浩特市第一医院以检验试剂为主的医用耗材采购招标公告`
-(2900万, contains 过敏原特异性IgE抗体检测试剂盒) was **successfully pushed
-2026-09-02**, one day before `817fe13`. Under `817fe13` code it is dropped by `PCR`.
-It survived this run only because `already_seen` matched first.
-
-Note `8aa8ec0` had already reverted `化学发光` out of `EXCLUDE_TERMS` for the same
-class of reason. This was the second occurrence.
-
-## 2. THE FIX
-
-### 2.1 `search_common.screen_domain(title_text, body_text)` — new single entry point
-
-Returns `{"keep": bool, "reason": str, "signals": [...], "body_exclude_term": str}`.
-
-Rule:
-1. exclude term in **title scope** -> drop.
-2. no target category signal in title+body -> drop.
-3. otherwise keep; an exclude term found in **body scope** is returned as
-   `body_exclude_term`, a marker only, never a drop reason.
-
-`product` / `product_list` (the flattened goods list) is **body scope, not title
-scope** — jrbx puts `全自动体外过敏原筛查系统及其配套试剂` and `梯度pcr` in the
-same field.
-
-Callers rewritten: `tender_pipeline` unified layer, `jrbx.passes_prefilter`
-(now returns the dict, not bool), `plap.screen_row`.
-`plap.matched_target_terms` no longer self-excludes (all call sites are already
-behind `screen_row`).
-
-### 2.2 Second gap found while verifying the fix: `product_list` was not persisted
-
-`jrbx.build_candidate` used `item["product"]` for its own attribution but never
-wrote it to the candidate. When a body says `详见附件` / `下载`, the goods list
-exists ONLY in that field. Consequence: the candidate survived the adapter, then
-died at the unified layer with `无目标品类信号`, and `命中关键词` came out empty.
-
-Fixed by threading `product_list` through every hop:
-- `jrbx.build_candidate` -> emits `product_list`
-- `search_common.write_candidates` -> persists it in `content/<id>.json`
-- `search_common.merge_source_dirs` -> carries it to the unified candidate
-- `tender_pipeline` -> includes it in (a) `screen_domain` body scope,
-  (b) `retrieved_text` for `matched_keywords`/`departments`,
-  (c) the pushed `内容（检索的摘要）` as a trailing `【标的清单】...` segment
-
-(c) matters: without it the push showed no product at all for such notices and
-sales could not judge relevance.
-
-### 2.3 Observability
-
-jrbx prefilter drops were invisible (`return False`, no record). The 11 drops were
-only discoverable by human cross-check. Now `search_summary.json` carries
-`prefilter_dropped: [{notice_id, stage, title, reason}]`, `stage` in
-`{listing, detail}`.
-
-### 2.4 Tests
-
-`tests/test_search_common.py::MixedBundleScreeningTests` — pins all 6 real misses
-by their actual body fragments, plus: title-scope exclusion still drops;
-body exclude term without target signal still drops; clean candidate has empty
-`body_exclude_term`; `product_list`-only signal survives.
-
-`tests/test_jrbx_search.py::PrefilterTests` — updated for the dict return, plus
-`test_exclude_term_only_in_product_list_keeps_candidate`.
-
-`ProductDomainScreenTests.test_exclude_terms_beat_target_terms` renamed to
-`test_exclude_terms_are_recognised`; the old name asserted a precedence that no
-longer holds.
-
-### 2.5 Docs updated
-
-`SKILL.md` (screening paragraph under 完成条件), `references/keywords.md`
-(「排除词」rewritten with the measured table + new 「预筛丢弃必须留痕」),
-`references/verification.md` (new 「`body_exclude_term` 非空 = 混合包」 section;
-fixed the stale 「排除词命中就丢」 sentence in 产品域判断).
-
-## 3. PUSHES MADE THIS SESSION
-
-Run `.tmp/search/2026-09-04` (main; 54 candidates, 19 queued, 2 batches,
-2 create / 17 exclude / 0 manual):
-
-1. `C0A36E9EC9AA4` 新疆维吾尔自治区人民医院白鸟湖医院 检验科抗核抗体IgG及相关试剂
-   — budget corrected to 100000. jrbx structured `budget` said 10000000, body says
-   `预算金额（元）：100000` twice. **jrbx budget field is not trustworthy alone.**
-2. `C40362EB96824` 浙江大学医学院附属儿童医院 白介素6(IL-6)快速测定试剂及设备租赁
-
-Run `.tmp/search/2026-09-04-recovered` (rebuilt from a known notice id; no new search):
-
-3. `C5D6E48CC2A7F` 国家康复辅具研究中心附属康复医院 2026年医用耗材试剂遴选
-   — recovered from the bug. `body_exclude_term: PCR`, tier `broad`, signal `细胞因子`.
-
-## 4. OPEN ITEMS — ACT ON THESE
-
-### 4.1 RESOLVED — Feishu ledger imported
-
-Was: the 4 announcements the user posted to Feishu by hand were absent from
-`data/seen.json` and would have been re-pushed as duplicates.
-
-Resolved by importing `招标信息实时监测智能体_招标信息跟踪档案.csv` (374 rows, the
-full Feishu archive, every row `是否已推送=1`). `data/seen.json` 81 -> 387:
-+304 CSV rows, +2 aliases, 70 skipped as already-known or intra-CSV duplicates.
-
-Imported records carry only the three fields `historical_identity_keys` actually
-uses (`标题`, `链接`, `发布时间`) plus `_pushed: true`, `_source:
-feishu_csv_import_2026-09-04`, `_feishu_id`. Deliberately minimal: `record_push`
-treats a WEBHOOK_FIELD missing from a duplicate as equal
-(`field not in duplicate or ...`), so a thin record can never trip
-`seen中已存在同链接但内容不同的记录`.
-
-**Two traps hit during the import — read before importing another export:**
-
-1. **73 of the 374 Feishu links are not announcement pages.** They are aggregator
-   tag/search/list pages (`https://www.120bid.com/tag/53_4785_mianyifenxiyi.html`
-   backs 7 different notices) or SPA links whose id lives in the fragment
-   (`https://ctbpsp.com/#/bulletinDetail?uuid=...` normalizes to the bare domain
-   `https://ctbpsp.com/`). 21 normalized URLs covered 56 rows. Importing those as
-   url keys would falsely suppress every future candidate on those domains.
-   Handled by `url_is_trustworthy`: a link earns a url key only if it is unique
-   within the import, has a real path or query, and is not a tag/search/list path.
-   The other 73 rows are stored with `_untrusted_link` (kept for humans, not a
-   dedup key) and dedup on `title_date` alone.
-
-2. **`normalize_url("")` returns `"/"`**, so a record with no link used to emit a
-   real-looking `("url", "/")` key. First blank-link record claimed it and the next
-   72 were discarded as duplicates. Fixed in
-   `tender_pipeline.historical_identity_keys` (skip the url key when normalized is
-   `"/"`), pinned by `tests/test_search_common.py::HistoricalIdentityKeyTests`.
-
-**Two alias records added** (`_source: manual_feishu_alias_2026-09-04`) because the
-Feishu title/link and the pipeline-side title/link differ enough that no key would
-match. Both verified by hand this session:
-
-| Feishu side | pipeline side |
-| --- | --- |
-| `【院务公开】阿拉善盟中心医院实验室设备配置项目招标公告` + mp.weixin link | `阿拉善盟中心医院实验室设备配置项目招标公告` + ccgp.gov.cn link |
-| `长沙市医健建设发展有限公司检验科…` (single prefix) + ctbpsp link | `长沙市医健建设发展有限公司长沙市医健建设发展有限公司检验科…` (doubled prefix, jrbx full-body record) |
-
-Verified after import: all 5 pipeline-side identities (both 长沙 records, 阿拉善盟,
-仙居, 甘肃) are blocked; 0 duplicate url keys and 0 bare-domain keys in the ledger;
-the 3 real pushes from this session survive. A `prepare` re-run over the main
-search dir moved `already_seen` 7 -> 10 and left 0 unjudged candidates in the queue.
-
-If another Feishu export is imported later, reuse `url_is_trustworthy` — do not
-trust the `链接` column blindly.
-
-### 4.1b DONE — seen.json slimmed, pruned, and given a buyer dimension (2026-09-05)
-
-Three changes, all landed:
-
-1. `内容（检索的摘要）` is no longer stored (`tender_pipeline.SEEN_OMITTED_FIELDS`).
-   It was 39% of ledger bytes and contributes nothing to dedup.
-2. Ledger keeps only the last ~2 months, by `发布时间` falling back to `_first_seen`.
-   Search windows are 72h, so older notices can never be recalled.
-3. `historical_identity_keys` gained a 4th positional arg `buyer`; the `title_date`
-   key is now `(fp(title), date, fp(buyer))`. Without it, a template title reused by
-   two hospitals on the same day collides and a never-pushed notice is dropped
-   silently. Strictness is deliberate: an inconsistent buyer string costs one
-   duplicate push (visible); a collision costs a missed opportunity (invisible).
-   All 4 call sites pass it (2 in `prepare`, 2 in `record_push`); candidates read it
-   from `item["source_fields"]["单位"]`, which is already in the candidate index at
-   that point (before `load_candidate_content`).
-
-Ledger after migration: 387 -> 380 records, 334 KB -> 213 KB (575 B/record),
-0 records still carrying a summary, 357/380 carrying `单位`.
-
-**The buyer dimension is computed at compare time, not frozen at write time**, so
-it applies to old records too — but only if they actually store `单位`. The 306
-CSV-imported records stored only 3 fields, so `单位` was backfilled from the CSV
-(303 filled) and hand-set on the 2 alias records. Re-verified after migration: all
-5 pipeline-side identities for the manually-posted notices, plus this session's own
-3 pushes, are still blocked; a `prepare` re-run gives the same counts as before
-(`already_seen` 10, `queued` 17), i.e. the added dimension broke no existing dedup.
-
-23 records still have no `单位` (15 pipeline records where 单位 was verified as
-`null`, 8 imported rows whose Feishu 单位 cell was empty). They emit an empty buyer
-fingerprint, i.e. old behaviour. Worst case each costs one duplicate push.
-
-`.gitignore` no longer lists `data/seen.json`. The entry claimed the ledger was kept
-as an empty skeleton via `git update-index --skip-worktree`, but that bit was never
-set (`git ls-files -v` showed `H`) and 652ec73 / c57ea22 both committed the full
-ledger. Current practice: seen.json is tracked and every commit carries the latest
-business intel.
-
-### 4.2 MEDIUM — `变应原皮肤点刺液` product scope unresolved
-
-`彭州市人民医院2026年第二十次医用耗材临时采购遴选项目（第二次挂网）`
-(jrbx `E0BC8E8018F8CC8DD43E0D3054E282D0`): 包件1 = 悬铃木花粉 / 德国小蠊 /
-猫毛皮屑 变应原皮肤点刺液, 600元/个, 国产, 挂网. 包件2 = 科研试剂 (DMEM培养基,
-DNA ladder, 内切酶, HRP二抗) -> clearly out.
-
-Judged **not pushed**, on the grounds that 皮肤点刺液 is in-vivo diagnostic while
-the 过敏 table in `keywords.md` is in-vitro only (sIgE / 总IgE / 食物不耐受 sIgG /
-免疫印迹仪). **This is a product-scope question, not a screening question**: if
-浩欧博 sells or intends to sell 点刺液, the 过敏 table needs that row and this
-decision flips. Ask 业务方. Until then the current tables are authoritative and
-the exclusion stands.
-
-### 4.3 MEDIUM — `25羟基维生素D` and `细胞因子` lines still unconfirmed
-
-`verification.md` records that frontline sales repeatedly report 公司无相关产品 for
-both, while both remain in the 自免 table. Protocol says judge normally until
-业务方 confirms. Two of the three pushes this session (`C40362EB96824`,
-`C5D6E48CC2A7F`) are 细胞因子/IL-6. If 业务方 confirms there is no product, delete
-those two rows from the tables in `keywords.md`; `BROAD_SIGNAL_GROUPS` in
-`search_common.py` already lists them as low-yield. That would also remove a large
-share of the remaining broad-tier noise.
-
-### 4.4 MEDIUM — `截止时间` comes out `null` for 院内遴选 / 院内自行采购
-
-`verification.md` 易错字段 forbids using 报名 / 文件获取 deadlines. These notice
-types often publish **no** separate 投标/响应文件提交截止 — only a 报名 window that
-functionally is the response deadline (`逾期提交资料将不再接收`). Applied strictly
-this session, so `C40362EB96824` (浙大儿院, 报名 9/3-9/14) and `C5D6E48CC2A7F`
-(康复辅具, 报名 9/7-9/11 16:00) both shipped with `截止时间: "null"`, losing the
-only actionable date from that field. The date does survive inside
-`内容（检索的摘要）`.
-
-Consider a narrow amendment: allow 报名截止 as `截止时间` **only when** the notice
-publishes no later submission step. Do not change this silently — it alters what
-sales sees in a fixed field. jrbx exposes `registerDeadline` for these
-(康复辅具: 1789113600000 = 2026-09-11 16:00 CST), so it is mechanically available.
-
-### 4.5 LOW — jrbx stores duplicate records for one announcement
-
-`长沙市医健` exists twice in jrbx: `DA2B49D904B85A77DD50F654DC76A832` is a 149-char
-stub (title + 发布时间 + 信息来源 link only, `product` empty), while
-`E179B6410FDE95D1A9DCB64B89BB5DC7` carries the full 86-row equipment list. Recall
-correctness depends on which one a query returns. The stub yields no target signal
-and is dropped as noise — correct in isolation, but it means a real announcement
-can end up represented only by its stub. No fix attempted. If this recurs,
-de-duplicate jrbx records by title fingerprint inside the adapter and prefer the
-one with the longer body.
-
-### 4.6 LOW — CCGP transient timeouts
-
-Main run had 4 CCGP query timeouts (`狼疮`, `硬皮`, `肌炎`, `gp210`). Retried
-separately at `--delay 3`; all 4 succeeded and yielded 1 extra candidate that was
-merged back in. `ccgp_search.py` has no internal retry. Cheap improvement: one
-retry with backoff on `read operation timed out`.
-
-### 4.7 INFO — jrbx origin-url quota exhausted 2026-09-04
-
-`original_url` returned the quota code, so the recovered candidate uses the jrbx
-article permalink (`link_kind: jrbx_article`, `source_priority` 250), which needs a
-jrbx login to open. Expected behaviour; resets daily.
-
-## 5. WHAT WENT INTO THE COMMIT
-
-Committed together on `feat/rewrite-keyword-tables` as `c57ea22`, after confirming
-the pre-existing working-tree changes do not conflict with this fix. The push to
-`origin` was blocked by the sandbox permission classifier and is still pending.
-
-Two independent workstreams share the commit:
-
-1. **Pre-existing (not authored this session)** — jrbx multi-account pool and 1403
-   rate-limit rotation: `JrbxClient` (account retire + in-place retry on the next
-   account), credential pool loading, `check_token` per-account output,
-   `config/jrbx.example.json` `accounts[]` schema, `tender_search.py`
-   `AUTH_ERROR_EXIT_CODES` (3 = 登录态失效, 5 = 池空频控), `README.md`,
-   `references/jrbx.md`.
-2. **This session** — the screening fix (§2), `product_list` plumbing,
-   `prefilter_dropped` logging, the `normalize_url("")` identity-key fix, the
-   Feishu ledger import (§4.1), and this document.
-
-Conflict check performed: workstream 1 touches `jrbx_search.py` lines ~99-630
-(credentials / client / `main`); workstream 2 touches `passes_prefilter` (~754),
-`build_candidate` (~882), `collect` (~948). No overlapping hunks; 159 tests pass
-with both applied.
-
-`_scratch/` was left untracked and out of the commit.
-
-## 6. HOW TO RE-VERIFY WITHOUT A NEW SEARCH
-
-```
-python -m unittest tests.test_search_common.MixedBundleScreeningTests -v
-python -m unittest tests.test_jrbx_search.PrefilterTests -v
-```
-
-To re-measure live damage on any window: monkeypatch
-`jrbx_search.excluded_domain_term` to return `""`, run
-`jrbx.collect(..., max_origin_lookups=0)` (costs no origin-url quota), and diff the
-candidate count against a normal run. Record which drops carried a non-empty
-`target_category_signals` — those are the false kills.
+`data/seen.json` 里 380 条历史记录的 `链接` 全部来自旧信源。没有回填计划——
+身份键是比较时现算的，标题+日期+采购人那条兜底键已经覆盖，实跑验证过（§4）。

@@ -13,7 +13,7 @@ from search_common import (  # noqa: E402
     screen_domain,
     merge_source_dirs,
     non_hospital_buyer,
-    plap_notice_id,
+    zlbx_bid_id,
     signal_tier,
     target_category_signals,
     title_fingerprint,
@@ -213,60 +213,54 @@ class SignalTierTests(unittest.TestCase):
 
 
 class SearchMergeTests(unittest.TestCase):
-    def test_ccgp_http_is_canonicalized_to_https(self):
-        self.assertEqual(
-            canonical_url("http://www.ccgp.gov.cn/a.htm?utm_source=x"),
-            "https://www.ccgp.gov.cn/a.htm",
+    def test_zlbx_site_url_is_canonicalized_and_session_param_dropped(self):
+        """`sk` 每次调用都不同，不剥掉同一条公告跨运行会变成两个身份。"""
+        first = canonical_url(
+            "http://www.zhiliaobiaoxun.com/content/602767708/b1?sk=ADEC14&from=skill"
         )
-
-    def test_plap_url_drops_routing_parameters_and_keeps_notice_id(self):
-        raw = (
-            "https://www.plap.mil.cn/freecms/site/juncai/ggxx/info/2026/"
-            "8a1d04009fd98fe401a03138aab456cf.html?noticeType=001024&channel=abc"
+        second = canonical_url(
+            "https://www.zhiliaobiaoxun.com/content/602767708/b1?sk=5114E2&from=mcp"
         )
-        normalized = canonical_url(raw)
-        self.assertNotIn("noticeType", normalized)
-        self.assertNotIn("channel", normalized)
-        self.assertEqual(plap_notice_id(normalized), "8a1d04009fd98fe401a03138aab456cf")
+        self.assertEqual(first, second)
+        self.assertEqual(first, "https://www.zhiliaobiaoxun.com/content/602767708/b1")
+        self.assertEqual(zlbx_bid_id(first), "602767708")
 
-    def test_cross_source_duplicate_prefers_ccgp_and_keeps_jrbx_attribution(self):
+    def test_zlbx_bid_id_only_matches_own_host(self):
+        self.assertEqual(zlbx_bid_id("https://example.gov.cn/content/12345"), "")
+
+    def test_full_record_wins_over_stub_of_same_announcement(self):
+        """知了给同一条公告存两份：壳只有标题，完整记录才带目标品类信号。
+
+        长沙市医健那条实测壳 165 字、完整记录 65,351 字，而「自身抗体」只在后者里。
+        壳的标题干净，完整记录的标题把采购人名重复了一遍，所以两者靠 bid_id 归并。
+        """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            jrbx = root / "jrbx"
-            ccgp = root / "ccgp"
-            write_candidates([{
-                "title": "某医院过敏原试剂公开招标公告",
-                "site_name": "转载站",
-                "url": "https://mirror.example/tender/1",
-                "publish_time": "2026-08-21",
-                "summary": "项目编号：ABC-2026-01",
-                "content": "项目编号：ABC-2026-01 采购方式：公开招标",
-                "found_by_query": [1, 3],
-                "found_by_source_query": [{"source": "jrbx", "query_number": 1}],
-                "source": "jrbx",
-                "sources": ["jrbx"],
-            }], jrbx, "2026-08-23")
-            write_candidates([{
-                "title": "某医院过敏原试剂公开招标公告",
-                "site_name": "中国政府采购网",
-                "url": "http://www.ccgp.gov.cn/cggg/dfgg/gkzb/202608/t20260821_27184986.htm",
-                "publish_time": "2026-08-21 19:47:44",
-                "summary": "官方摘要",
-                "content": "官方完整正文",
-                "source_fields": {"项目编号": "ABC-2026-01", "公告类型": "公开招标公告"},
-                "found_by_source_query": [{"source": "ccgp", "query": "过敏原"}],
-                "source": "ccgp",
-                "sources": ["ccgp"],
-                "date_authoritative": True,
-                "retrieval_verified": True,
-            }], ccgp, "2026-08-23")
+            source = root / "zlbx"
+            write_candidates([
+                {
+                    "bid_id": "602961567",
+                    "title": "某公司检验科等科室设备采购项目招标公告",
+                    "url": "https://ctbpsp.com/#/bulletinDetail?uuid=abc",
+                    "source": "zlbx", "sources": ["zlbx"],
+                    "summary": "", "content": "完整信息请查看原文",
+                    "retrieval_verified": True, "content_access": "metadata_only",
+                },
+                {
+                    "bid_id": "602961567",
+                    "title": "某公司某公司检验科等科室设备采购项目招标公告",
+                    "url": "https://hnsggzy.com/#/resources/projectDetail?id=xyz",
+                    "source": "zlbx", "sources": ["zlbx"],
+                    "summary": "全自动自身抗体检测系统",
+                    "content": "招标编号：cjcg26-014 ... 全自动自身抗体检测系统 18 万 ...",
+                    "retrieval_verified": True, "content_access": "public_full",
+                },
+            ], source, "2026-09-05")
 
-            merged = merge_source_dirs([jrbx, ccgp])
+            merged = merge_source_dirs([source])
             self.assertEqual(len(merged), 1)
-            self.assertEqual(merged[0]["source"], "ccgp")
-            self.assertEqual(merged[0]["content"], "官方完整正文")
-            self.assertEqual(merged[0]["found_by_query"], [1, 3])
-            self.assertEqual(set(merged[0]["sources"]), {"ccgp", "jrbx"})
+            self.assertIn("自身抗体", merged[0]["content"])
+            self.assertEqual(merged[0]["content_access"], "public_full")
             self.assertEqual(len(merged[0]["alternate_sources"]), 1)
 
     def test_same_project_different_notice_stage_is_not_merged(self):
@@ -274,7 +268,7 @@ class SearchMergeTests(unittest.TestCase):
             root = Path(tmp)
             first = root / "first"
             second = root / "second"
-            common = {"site_name": "中国政府采购网", "publish_time": "2026-08-21", "source": "ccgp"}
+            common = {"site_name": "知了标讯", "publish_time": "2026-08-21", "source": "zlbx"}
             write_candidates([common | {
                 "title": "某项目公开招标公告", "url": "https://example.test/a",
                 "content": "项目编号：ABC-1", "source_fields": {"项目编号": "ABC-1", "公告类型": "公开招标公告"},
@@ -285,28 +279,6 @@ class SearchMergeTests(unittest.TestCase):
             }], second, "2026-08-23")
             self.assertEqual(len(merge_source_dirs([first, second])), 2)
 
-    def test_plap_official_candidate_wins_over_jrbx_copy(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            jrbx = root / "jrbx"
-            plap = root / "plap"
-            title = "某医院自身抗体试剂采购公告"
-            write_candidates([{
-                "title": title, "url": "https://mirror.example/1", "source": "jrbx",
-                "summary": "转载摘要", "content": "转载正文", "retrieval_verified": False,
-            }], jrbx, "2026-08-25")
-            write_candidates([{
-                "title": title,
-                "url": "https://www.plap.mil.cn/freecms/site/juncai/ggxx/info/2026/8a1d04009fd98fe401a03138aab456cf.html",
-                "source": "plap", "sources": ["plap"], "source_priority": 400,
-                "summary": "官方摘要", "content": "官方公开正文",
-                "retrieval_verified": True, "content_access": "public_partial",
-            }], plap, "2026-08-25")
-            merged = merge_source_dirs([jrbx, plap])
-            self.assertEqual(len(merged), 1)
-            self.assertEqual(merged[0]["source"], "plap")
-            self.assertEqual(merged[0]["content_access"], "public_partial")
-
     def test_seen_identity_requires_same_date_for_title_only_match(self):
         first = historical_identity_keys("某医院试剂采购公告", "https://a.test/1", "2026-08-21")
         mirror = historical_identity_keys("某医院试剂采购公告", "https://b.test/2", "2026-08-21")
@@ -314,10 +286,10 @@ class SearchMergeTests(unittest.TestCase):
         self.assertTrue(first & mirror)
         self.assertFalse(first & next_year)
 
-    def test_verified_ccgp_fields_prefill_record_and_authoritative_date_wins(self):
+    def test_source_fields_are_bound_into_record_and_authoritative_date_wins(self):
         candidate = {
             "title": "某医院过敏原试剂公开招标公告",
-            "site_name": "中国政府采购网",
+            "site_name": "知了标讯",
             "url": "https://www.ccgp.gov.cn/cggg/dfgg/gkzb/202608/t20260821_1.htm",
             "publish_time": "2026-08-21 19:47:44",
             "date_authoritative": True,
@@ -415,8 +387,8 @@ class HistoricalIdentityKeyTests(unittest.TestCase):
 class MixedBundleScreeningTests(unittest.TestCase):
     """混合包回归：硬排除只在标题域决定去留，正文域只打标记。
 
-    判据是 2026-09-03~09-04 两天窗口的实跑。当时正文域也硬排除，睿销漏 5 条、
-    CCGP 漏 1 条真候选，同期实际推送只有 2 条——漏的比发的多。下面每条都是那次
+    判据是 2026-09-03~09-04 两天窗口的实跑。当时正文域也硬排除，漏掉 6 条真候选，
+    同期实际推送只有 2 条——漏的比发的多。下面每条都是那次
     实跑里被误杀的原文片段。
     """
 
@@ -470,7 +442,7 @@ class MixedBundleScreeningTests(unittest.TestCase):
         """正文写「详见附件/下载」时，清单只在来源自带的标的字段里。
 
         原型是国家康复辅具研究中心附属康复医院的耗材试剂遴选：正文只有一个「下载」，
-        `白介素6(IL-6)测定试剂盒` 只出现在睿销 product 字段里。该字段以 product_list
+        `白介素6(IL-6)测定试剂盒` 只出现在来源的标的物清单字段里。该字段以 product_list
         随候选落盘，统一层把它并进正文域，否则候选会以「无目标品类信号」二次丢失。
         """
         body = "拟采购医用耗材试剂，其主要用途和要求如下：下载"
@@ -630,7 +602,7 @@ class LooseIdentityTests(unittest.TestCase):
         self.assertFalse(title_identity_duplicate(candidate, known))
 
     def test_cross_platform_repost_within_the_window_matches(self):
-        """省级交易网先发、CCGP 地方公告隔天转载：链接和公告号都对不上，只剩标题。"""
+        """省级交易网先发、政府采购网隔天转载：链接对不上，只剩标题。"""
         known = [self._identity(
             "[政采云]新疆维吾尔自治区人民医院白鸟湖医院检验科抗核抗体IgG及相关试剂采购项目二次公开招标公告",
             "2026-09-03", "新疆维吾尔自治区人民医院白鸟湖医院")]
@@ -709,7 +681,7 @@ class SummaryCompositionTests(unittest.TestCase):
     """推送摘要不许出现 `【标的清单】null`（2026-09-05 实测 12 条载荷里 4 条中招）。"""
 
     def test_missing_product_list_adds_nothing(self):
-        """只有睿销供 product_list，CCGP/PLAP 候选一律是空。"""
+        """正文没有标的清单时 product_list 就是空，拼接处必须显式比 "null"。"""
         for empty in ("", None, "null", "   "):
             self.assertEqual(compose_summary("项目概况：某某医院检验试剂采购", empty),
                              "项目概况：某某医院检验试剂采购")

@@ -45,8 +45,8 @@ class WebhookSchemaTests(unittest.TestCase):
         text = "项目使用科室：医学检验科\n拟采购过敏原检测试剂。"
         candidate = {
             "found_by_source_query": [
-                {"source": "jrbx", "query_number": 1, "query": "过敏原检测 试剂 招标公告"},
-                {"source": "ccgp", "query": "过敏原"},
+                {"source": "zlbx", "query_number": 1, "query": "过敏原检测 试剂 招标公告"},
+                {"source": "zlbx", "query": "过敏原"},
             ]
         }
         self.assertEqual(extract_departments(text), ["医学检验科"])

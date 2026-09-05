@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""检索适配器共享的候选契约、落盘与跨来源去重。"""
+"""检索适配器共享的候选契约、落盘与去重。"""
 
 from __future__ import annotations
 
@@ -11,13 +11,13 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
-TRACKING_KEYS = {"spm", "from", "source", "track", "timestamp", "t"}
-CCGP_ARTICLE_RE = re.compile(r"/t\d{8}_(\d+)\.htm$", re.I)
-PLAP_NOTICE_RE = re.compile(r"/ggxx/info/\d{4}/([0-9a-f]{32})\.html$", re.I)
-PLAP_HOSTS = {"plap.mil.cn", "www.plap.mil.cn"}
+# `sk` 是知了标讯站内链接上的会话参数，同一条公告每次调用取回的值都不同，
+# 不剥掉就会让同一条公告在跨运行去重时变成两个身份。
+TRACKING_KEYS = {"spm", "from", "source", "track", "timestamp", "t", "sk"}
+ZLBX_CONTENT_RE = re.compile(r"/content/(\d+)(?:/[a-z0-9]+)*/?$", re.I)
+ZLBX_HOSTS = {"zhiliaobiaoxun.com", "www.zhiliaobiaoxun.com"}
 SOURCE_PRIORITIES = {
-    "ccgp": 400,
-    "plap": 400,
+    "zlbx": 400,
 }
 PROJECT_ID_RE = re.compile(
     r"(?:项目编号|采购项目编号|招标编号|项目编码)\s*[：:]\s*"
@@ -40,7 +40,7 @@ def _any(*fragments):
 # 目标品类信号 = 业务方《过敏》《自免》两张关键词表，分组即表里的谱系划分。
 # 词表与取词规则见 references/keywords.md，那里是唯一来源；本表只是它的正则实现。
 #
-# 2026-09-03 实测睿销与 CCGP 都是「长复合词命中骤降、短片段是超集」，检索词已按最短片段
+# 2026-09-03/09-05 实测各库都是「长复合词命中骤降、短片段是超集」，检索词已按最短片段
 # 放宽（`红斑狼疮`→`狼疮`、`免疫印迹仪`→`印迹`、`类风湿`→`风湿`…）。**本表必须跟着放宽到
 # 同一批片段**，否则宽词捞回来的公告会在预筛就被扔掉，等于白捞。宁可多留、由核实阶段的
 # 模型按 references/verification.md 判掉。
@@ -122,7 +122,7 @@ TARGET_CATEGORY_PATTERNS = [
     )),
 ]
 
-# 非本司产品域的排除词。三个来源共用同一份，词表见 references/keywords.md「排除词」。
+# 非本司产品域的排除词。词表见 references/keywords.md「排除词」。
 # **只在标题域决定去留**，正文域改为打标记——原因见 screen_domain。
 EXCLUDE_TERMS = re.compile(
     r"酶标仪|电泳|兽医|兽用|畜牧|生猪|结核|干扰素释放|免疫组化|重组蛋白|培养基|缓冲液|核酸|PCR|测序",
@@ -167,16 +167,16 @@ def title_mixed_bundle_term(title_text):
 
 
 def screen_domain(title_text, body_text=""):
-    """三来源共用的产品域预筛，返回 dict(keep/reason/signals/title_exclude_term/body_exclude_term)。
+    """产品域预筛，返回 dict(keep/reason/signals/title_exclude_term/body_exclude_term)。
 
     `title_text` 是「这条公告是关于什么的」——标题，以及标题派生的产品词。
     `body_text` 是设备与试剂清单——正文、摘要，以及把全部标的拉平成一串的
-    `product` 字段。**清单属于正文域，不是标题域**：睿销的 `product` 会把
+    标的物清单字段。**清单属于正文域，不是标题域**：知了的 `sm_names` 会把
     「全自动体外过敏原筛查系统及其配套试剂」和「梯度pcr」并列写进同一个字段。
 
     硬排除只在标题域决定去留。正文域命中排除词不再丢弃候选：一份几十行的科室
     设备清单几乎必然出现 PCR、核酸或培养基，无差别连坐会把混合包整类打掉。
-    2026-09-04 用 09-03~09-04 两天窗口实测，这条规则让睿销漏 5 条、CCGP 漏 1 条
+    2026-09-04 用 09-03~09-04 两天窗口实测，这条规则漏掉 6 条
     真候选，其中三条正文写明「全自动自身抗体检测系统」「全自动体外过敏原筛查
     系统及其配套试剂」「化学发光免疫分析仪(自身免疫检测+过敏原专用)」；同期
     实际推送只有 2 条，漏的比发的多。混合包本就该交给核实阶段判
@@ -282,16 +282,15 @@ def compact_text(value, limit=None):
     return text
 
 
-# 聚合站给标题加的栏目/来源标签，不属于公告身份：睿销把柳铁那条存成
+# 聚合站给标题加的栏目/来源标签，不属于公告身份：柳铁那条被存成
 # 「【调查公告】柳州市柳铁中心医院…」，人工台账里同一条没有这个壳；白鸟湖那条在
-# 新疆公共资源网叫「[政采云]…」，在 CCGP 地方公告就没有前缀。不剥这层壳，同一条
+# 新疆公共资源网叫「[政采云]…」，在政府采购网就没有前缀。不剥这层壳，同一条
 # 公告在两个平台上就是两个身份，去重必漏（2026-09-05 实测）。
 # 只认方头/中文方头括号：圆括号在中文标题里常常是内容的一部分（「（第二次）」），
 # 剥掉会把不同轮次的公告混成一条。
 TITLE_TAG_RE = re.compile(r"^\s*[【\[][^】\]]{1,10}[】\]]\s*")
-# 睿销的列表与详情接口都把标题截断在 54 字并以省略号收尾（titleProduct、product
-# 同样被截，回源前拿不到完整标题）。指纹里去掉省略号，截断标题的指纹才会是完整
-# 标题指纹的**前缀**，tender_pipeline 的前缀判重才有意义。
+# 聚合来源会把长标题截断并以省略号收尾，台账里那批历史记录也有。指纹里去掉省略号，
+# 截断标题的指纹才会是完整标题指纹的**前缀**，tender_pipeline 的前缀判重才有意义。
 TITLE_ELLIPSIS_RE = re.compile(r"(?:\.{3,}|。{3,}|[…⋯]+)\s*$")
 
 
@@ -316,20 +315,20 @@ def title_fingerprint(title):
 
 
 def canonical_url(raw):
-    """去跟踪参数，并规范 CCGP、PLAP 官方公告链接。"""
+    """去跟踪参数并统一 scheme。
+
+    回源到的原始站点五花八门（政府采购网、省级平台、医院自建站、公众号文章），
+    这里只做通用规范化，不为某个站点写专用规则。
+    """
     try:
         parts = urlsplit(str(raw or "").strip())
         host = parts.netloc.lower()
         scheme = parts.scheme.lower()
-        if host in {"ccgp.gov.cn", "www.ccgp.gov.cn", "search.ccgp.gov.cn"} | PLAP_HOSTS:
+        if host in ZLBX_HOSTS:
             scheme = "https"
         query = []
         for key, value in parse_qsl(parts.query, keep_blank_values=True):
-            if (
-                key.lower().startswith("utm_")
-                or key.lower() in TRACKING_KEYS
-                or (host in PLAP_HOSTS and key.lower() in {"noticetype", "channel"})
-            ):
+            if key.lower().startswith("utm_") or key.lower() in TRACKING_KEYS:
                 continue
             query.append((key, value))
         path = parts.path.rstrip("/") or "/"
@@ -342,14 +341,13 @@ def candidate_id(url):
     return "C" + hashlib.sha256(canonical_url(url).encode("utf-8")).hexdigest()[:12].upper()
 
 
-def ccgp_article_id(url):
-    match = CCGP_ARTICLE_RE.search(urlsplit(canonical_url(url)).path)
+def zlbx_bid_id(url):
+    """知了标讯站内链接里的标讯 ID，用作去重身份键。"""
+    parts = urlsplit(canonical_url(url))
+    if parts.netloc.lower() not in ZLBX_HOSTS:
+        return ""
+    match = ZLBX_CONTENT_RE.search(parts.path)
     return match.group(1) if match else ""
-
-
-def plap_notice_id(url):
-    match = PLAP_NOTICE_RE.search(urlsplit(canonical_url(url)).path)
-    return match.group(1).lower() if match else ""
 
 
 def target_category_signals(text):
@@ -399,16 +397,21 @@ def extract_project_id(text):
 
 
 def identity_keys(candidate, content=None):
-    """保守身份键：同 URL、同 CCGP 公告号、同标题，或同项目号+同公告阶段。"""
+    """保守身份键：同 URL、同标讯 ID、同标题，或同项目号+同公告阶段。"""
     content = content or {}
     url = canonical_url(candidate.get("url") or content.get("source_url"))
     keys = {("url", url)} if url else set()
-    article_id = ccgp_article_id(url)
-    if article_id:
-        keys.add(("ccgp", article_id))
-    notice_id = plap_notice_id(url)
-    if notice_id:
-        keys.add(("plap", notice_id))
+    for source in (candidate, content):
+        bid_id = source.get("bid_id")
+        if bid_id:
+            keys.add(("zlbx", str(bid_id)))
+    for alternate in candidate.get("alternate_sources") or []:
+        alternate_id = zlbx_bid_id(alternate.get("url"))
+        if alternate_id:
+            keys.add(("zlbx", alternate_id))
+    site_id = zlbx_bid_id(url)
+    if site_id:
+        keys.add(("zlbx", site_id))
     fingerprint = candidate.get("title_fingerprint") or title_fingerprint(candidate.get("title"))
     if len(fingerprint) >= 8:
         keys.add(("title", fingerprint))
@@ -436,12 +439,13 @@ def write_candidates(candidates, out_dir, run_date):
         content_rel = f"content/{cid}.json"
         full = {
             "candidate_id": cid,
+            "bid_id": item.get("bid_id") or "",
             "title": item.get("title") or "",
             "source_url": url,
             "summary": item.get("summary") or "",
             "content": item.get("content") or "",
-            # 来源自带的标的清单（睿销 product 之类）。正文写「详见附件」「下载」时，
-            # 这是唯一能定品类的字段——不落盘统一层就只能看到一篇没有清单的公告。
+            # 来源自带的标的清单（知了的 sm_names + brand_names）。正文写「详见附件」
+            # 「下载」时，这是唯一能定品类的字段——不落盘统一层就只能看到一篇没有清单的公告。
             "product_list": item.get("product_list") or "",
             "source_fields": item.get("source_fields") or {},
             "field_evidence": item.get("field_evidence") or {},
@@ -456,6 +460,7 @@ def write_candidates(candidates, out_dir, run_date):
         teaser_source = full["summary"] or full["content"]
         index.append({
             "candidate_id": cid,
+            "bid_id": full["bid_id"],
             "title": full["title"],
             "title_fingerprint": title_fingerprint(full["title"]),
             "site_name": item.get("site_name") or "",
@@ -541,7 +546,13 @@ def _preference(candidate, content):
 
 
 def merge_source_dirs(source_dirs):
-    """合并任意适配器目录；按来源权威级别和正文可用性选主来源。"""
+    """合并候选并按正文可用性选代表。
+
+    知了会为同一条公告存两份记录：一份只有标题的壳（正文写「完整信息请查看原文」），
+    一份带完整正文。2026-09-05 实测长沙市医健那条，壳 165 字、完整记录 65,351 字，
+    而目标品类信号「自身抗体」只在完整记录里。`_preference` 按 content_access 与
+    正文长度取代表，正好让完整记录赢过壳——这是本函数在单信源下的主要价值。
+    """
     rows = []
     for source_dir in source_dirs:
         rows.extend(load_source_candidates(source_dir))
@@ -583,6 +594,7 @@ def merge_source_dirs(source_dirs):
                 })
 
         merged.append({
+            "bid_id": primary_candidate.get("bid_id") or primary_content.get("bid_id") or "",
             "title": primary_candidate.get("title") or primary_content.get("title") or "",
             "site_name": primary_candidate.get("site_name") or "",
             "url": canonical_url(primary_candidate.get("url")),

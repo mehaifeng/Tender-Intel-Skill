@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from ccgp_search import _extract_deadline  # noqa: E402
+from zlbx_search import _extract_deadline  # noqa: E402
 from hospital_match import (  # noqa: E402
     geo_is_confirmed,
     geo_is_suspect,
@@ -202,7 +202,7 @@ class GenericNameHijackTests(unittest.TestCase):
 
 class GeoHintTests(unittest.TestCase):
     def test_hint_may_match_any_administrative_level(self):
-        """调用方给的层级不可靠：CCGP 的「所属省/市」常是「宾县」「平和县」这类地名。
+        """调用方给的层级不可靠：来源的「所属省/市」常是「宾县」「平和县」这类地名。
         按层级对号入座会把真匹配误杀。"""
         record = {"n": "宾县人民医院", "p": "黑龙江省", "c": "哈尔滨市", "d": "宾县"}
         self.assertTrue(geo_matches(record, province="宾县"))
@@ -244,3 +244,70 @@ class RegionFieldTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceFieldBindingTests(unittest.TestCase):
+    """接口结构化字段直接绑定后，地理一致性没有模型把关，必须由管线自己守住。"""
+
+    def _run(self, source_fields, title="某医院试剂采购公告"):
+        from tender_pipeline import canonicalize_create
+        candidate = {
+            "candidate_id": "C1", "title": title, "site_name": "知了标讯",
+            "url": "https://example.gov.cn/a", "publish_time": "2026-09-04",
+            "date_authoritative": True, "retrieval_verified": True,
+            "source_fields": source_fields,
+            "search_evidence": {"summary": "摘要", "matched_keywords": [], "departments": []},
+        }
+        row = {"candidate_id": "C1", "decision": "create", "record": {},
+               "evidence": {"source_verified": True,
+                            "checked_at": "2026-09-05T20:30:00+08:00",
+                            "field_evidence": {}}}
+        record, _ = canonicalize_create(row, candidate)
+        return record, row
+
+    def test_structured_fields_are_bound_without_model_input(self):
+        record, _ = self._run({
+            "项目编号": "ABC-1", "单位": "云浮市妇幼保健院", "所属省/市": "广东",
+            "地区": "云浮市", "预算": "1700000", "采购方式": "公开招标",
+        })
+        self.assertEqual(record["项目编号"], "ABC-1")
+        self.assertEqual(record["预算"], "1700000")
+        self.assertEqual(record["采购方式"], "公开招标")
+        self.assertEqual(record["所属省/市"], "广东")
+        self.assertEqual(record["地区"], "广东省云浮市")
+        self.assertEqual(record["所属大区"], "华南大区")
+
+    def test_buyer_province_conflicting_with_api_province_blocks_geo_binding(self):
+        """实测：单位=浙江宁波的医院，接口 province 却是广东深圳。填错省份会发错大区。"""
+        record, row = self._run({
+            "单位": "浙江省宁波市宁海县城关医院", "所属省/市": "广东",
+            "地区": "深圳市南山区", "采购方式": "邀请招标",
+        })
+        self.assertNotEqual(record["所属省/市"], "广东")
+        self.assertNotIn("深圳", record["地区"])
+        self.assertEqual(record["采购方式"], "邀请招标")
+        self.assertTrue(any(a["field"] == "接口地理" for a in row["pipeline_adjustments"]))
+
+    def test_model_override_needs_field_evidence(self):
+        from tender_pipeline import canonicalize_create
+        candidate = {
+            "candidate_id": "C1", "title": "某医院试剂采购公告", "site_name": "知了标讯",
+            "url": "https://example.gov.cn/a", "publish_time": "2026-09-04",
+            "retrieval_verified": True, "source_fields": {"预算": "100"},
+            "search_evidence": {"summary": "摘要", "matched_keywords": [], "departments": []},
+        }
+        with_evidence = {"candidate_id": "C1", "decision": "create",
+                         "record": {"预算": "985000"},
+                         "evidence": {"source_verified": True,
+                                      "checked_at": "2026-09-05T20:30:00+08:00",
+                                      "field_evidence": {"预算": "预算金额：98.5万元"}}}
+        record, _ = canonicalize_create(with_evidence, candidate)
+        self.assertEqual(record["预算"], "985000")
+
+        without_evidence = {"candidate_id": "C1", "decision": "create",
+                            "record": {"预算": "985000"},
+                            "evidence": {"source_verified": True,
+                                         "checked_at": "2026-09-05T20:30:00+08:00",
+                                         "field_evidence": {}}}
+        record, _ = canonicalize_create(without_evidence, candidate)
+        self.assertEqual(record["预算"], "100")

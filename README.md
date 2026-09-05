@@ -5,10 +5,10 @@
 ## 处理流程
 
 ```text
-睿销（jrbx）聚合库检索 + CCGP官方HTTP检索 + PLAP匿名公开检索
-  → 统一候选契约与跨来源查重
+知了标讯检索（search_bids 自适应分批 + get_bid_detail 取正文与回源链接）
+  → 统一候选契约与查重（同一公告的壳记录让位于完整正文记录）
   → 标题与内容信号预筛
-  → 每批10条快速核验（CCGP缺字段时可按需读取直链附件）
+  → 结构化字段直接绑定，每批10条只做产品域判断
   → 全国医院库确定性匹配
   → 固定16字段校验
   → DryRun
@@ -22,15 +22,11 @@
 | `SKILL.md` | 运行契约与模式选择 |
 | `references/schema.md` | 固定16字段、医院匹配和大区规则 |
 | `references/verification.md` | 快速核验协议 |
-| `references/keywords.md` | 业务方《过敏》《自免》两张关键词表，三个信源的Query清单与筛选判据都在这里 |
-| `references/jrbx.md` | 睿销调用约束：登录态账号池与1403轮换、keywords的AND语义、回源URL配额 |
-| `references/ccgp.md` | CCGP的普通HTTP约束、单词Query限制和来源优先级 |
-| `references/plap.md` | 军队采购网匿名公开检索、混合策略和正文降级规则 |
-| `scripts/tender_search.py` | 可插拔多来源统一检索入口 |
-| `scripts/jrbx_search.py` | 睿销聚合库检索、回源链接补全与凭证维护 |
-| `scripts/ccgp_search.py` | 中国政府采购网普通HTTP检索与详情字段提取 |
-| `scripts/plap_search.py` | 军队采购网匿名公开列表检索与部分正文提取 |
-| `scripts/search_common.py` | 统一候选契约、链接规范化与跨来源查重 |
+| `references/keywords.md` | 业务方《过敏》《自免》两张关键词表，Query清单与筛选判据都在这里 |
+| `references/zlbx.md` | 知了标讯调用约束：OR语义、分页不稳定与分批策略、字段映射、覆盖面实测 |
+| `scripts/tender_search.py` | 检索入口 |
+| `scripts/zlbx_search.py` | 知了标讯检索、详情正文与回源链接补全 |
+| `scripts/search_common.py` | 统一候选契约、链接规范化与查重 |
 | `scripts/tender_pipeline.py` | 去重、预筛、批次、字段校验和回执登记 |
 | `scripts/hospital_match.py` | 医院名称、别名、等级的本地确定性匹配 |
 | `scripts/send_webhook.py` | 主用Webhook DryRun和生产发送门禁 |
@@ -41,7 +37,7 @@
 
 开箱包已经包含本地`config/webhook.json`，可以直接运行。该文件含凭据，已被Git忽略，请勿公开分享。
 
-睿销登录态按环境变量`JRBX_USER_ID`、`JRBX_TOKEN`、`JRBX_OPENID`（只表达得了一个账号）→ `config/jrbx.json`的`accounts`账号池的顺序读取；后者用`python scripts/jrbx_search.py --set-token`逐个写入，已被Git忽略。token有效期20天，过期需微信重新扫码，用`--check-token`逐个查剩余天数。返回码`1403`实测撞上即废，适配器会退池换下一个账号原地重发同一请求，池空才以退出码5中止，因此多备几个账号能让一趟检索跑完。Webhook按环境变量`FEISHU_WEBHOOK_URL` → 旧环境变量`FEISHU_CREATE_WEBHOOK_URL` → `config/webhook.json`的顺序读取。
+知了标讯 API Key 按环境变量`ZLBX_API_KEY` → `config/zlbx.json`的`api_key`顺序读取，模板见`config/zlbx.example.json`；该文件含凭据，已被Git忽略。Key没有到期机制，不需要定期换发。检索按调用次数计费，72h日窗一轮约24积分（列表）加通过预筛的候选每条1积分（详情），实测明细见`references/zlbx.md`。Webhook按环境变量`FEISHU_WEBHOOK_URL` → 旧环境变量`FEISHU_CREATE_WEBHOOK_URL` → `config/webhook.json`的顺序读取。
 
 ## 运行
 
@@ -51,12 +47,10 @@
 python scripts/tender_search.py
 ```
 
-默认同时运行`jrbx,ccgp,plap`。可用`--sources jrbx`、`--sources ccgp`或`--sources plap`单独诊断某个适配器。CCGP不需要账号或浏览器；搜索页、完整详情正文和附件直链均由普通HTTP读取。
-
-PLAP 默认启用，只读取军队采购网匿名公开信息，不登录，也不补全登录后字段。若详情页要求登录，适配器仍保留搜索结果中可见的标题、日期、公告类型和链接，并将正文访问状态标记为受限：
+默认窗口72小时。`--dry-run`不发请求也不读凭证，可用于校验清单与参数；`--max-details 0`跳过详情（会失去正文、科室与回源链接，仅用于诊断）。**退出码3表示API Key缺失、被拒或积分不足**，这类失败看起来像“今天没情报”，必须当凭证故障报警。
 
 ```bash
-python scripts/tender_search.py --sources plap --time-range 24h
+python scripts/tender_search.py --time-range 24h --dry-run
 ```
 
 建立队列：
@@ -98,7 +92,9 @@ python scripts/tender_pipeline.py record-push --run-dir <检索目录> --receipt
 
 `所属省/市`只输出省级行政区或直辖市简称，例如`北京`、`河北`、`上海`、`湖南`、`新疆`、`广西`、`青海`，不输出地级市或`省/市`组合。
 
-`地区`必须包含省份、自治区或直辖市全称，例如`安徽省凤阳县`、`北京市朝阳区`，不得只输出`凤阳县`或`朝阳区`。`科室`只取检索正文中明确标注的科室；`命中关键词`取实际检索Query中确实出现在候选内容里的词。
+`地区`必须包含省份、自治区或直辖市全称，例如`安徽省凤阳县`、`北京市朝阳区`，不得只输出`凤阳县`或`朝阳区`。`科室`只取正文中明确标注的科室；`命中关键词`取实际检索Query中确实出现在候选内容里的词。
+
+其中项目编号、单位、地区、所属省/市、截止时间、预算、采购方式由管线从知了标讯的结构化字段直接绑定（`tender_pipeline.SOURCE_BOUND_FIELDS`），模型不需要提取；覆盖须带正文证据。
 
 ## 依赖
 

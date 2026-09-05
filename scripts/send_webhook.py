@@ -155,9 +155,9 @@ def validate_manifest(manifest_path, payload_path, payload_sha256):
 
 
 def main():
-    # DryRun 会把整条载荷打回控制台。Windows 控制台默认 GBK，CCGP 正文里的零宽连接符
+    # DryRun 会把整条载荷打回控制台。Windows 控制台默认 GBK，公告正文里的零宽连接符
     # （U+200D）这类字符直接抛 UnicodeEncodeError，把 SKILL 规定的推送前离线校验卡死。
-    # 与 jrbx_search.py / tender_search.py 同一处置：先把两条流切到 UTF-8。
+    # 与 zlbx_search.py / tender_search.py 同一处置：先把两条流切到 UTF-8。
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
