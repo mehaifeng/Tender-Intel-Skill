@@ -691,13 +691,25 @@ def region_fields(item):
     return full + city + county, province
 
 
+# 睿销的 budget 以「分」计，不是元。2026-09-05 用 09-02 单日窗口的 36 条候选实测，
+# 8 条能从正文抠出预算的记录**全部**是结构化值 ÷ 100 = 正文值，无一例外：
+# 东胜区 36000000 / 36.000000万元、哈医大六院 1640000 / 16,400.00 元、
+# BA400 1875600 / 18,756.00 元、昆明延安 30960000 / 30.96 万元、福田风湿 5000000 /
+# 50,000.00 元、和美乡村 27000000 / 27 万元、红桥疾控 4725600 / 47,256.00 元、
+# 宝鸡中心 60000000 / 60.000000 万元。AGENT_HANDOFF.md §3 里人工改正过的
+# 10000000 / 100000 也是同一个比例。直接推出去会让销售看到 100 倍的预算。
+BUDGET_CENTS_PER_YUAN = 100
+
+
 def normalize_budget(value):
+    """把睿销的分转成元。返回空串表示这条没有可用预算。"""
     try:
         number = float(value or 0)
     except (TypeError, ValueError):
         return ""
     if number <= 0:
         return ""
+    number = number / BUDGET_CENTS_PER_YUAN
     return str(int(number)) if float(number).is_integer() else f"{number:.2f}".rstrip("0").rstrip(".")
 
 
@@ -824,10 +836,12 @@ def build_candidate(item, detail, origin_url, hits, all_terms):
         fields["所属省/市"] = province
         evidence["所属省/市"] = f"睿销结构化字段 province：{province}"
 
-    budget = normalize_budget(item.get("budget") or detail.get("budget"))
+    raw_budget = item.get("budget") or detail.get("budget")
+    budget = normalize_budget(raw_budget)
     if budget:
         fields["预算"] = budget
-        evidence["预算"] = f"睿销结构化字段 budget：{budget}"
+        # 原始值一起写进证据：这个字段以分计，核实阶段能直接对上正文里的元。
+        evidence["预算"] = f"睿销结构化字段 budget：{raw_budget} 分 = {budget} 元"
 
     deadline, deadline_evidence = pick_deadline({**item, **detail})
     if deadline:

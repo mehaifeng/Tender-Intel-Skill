@@ -27,6 +27,7 @@ from jrbx_search import (  # noqa: E402
     load_credential_pool,
     load_credentials,
     mask_user_id,
+    normalize_budget,
     parse_queries,
     parse_time_range,
     passes_prefilter,
@@ -56,7 +57,8 @@ def sample_item(**changes):
         "province": "广西",
         "city": "南宁市",
         "county": "青秀区",
-        "budget": 985000,
+        # 睿销的 budget 以分计（jrbx_search.BUDGET_CENTS_PER_YUAN）：98500000 分 = 985000 元
+        "budget": 98500000,
         "publishTime": to_millis(datetime(2026, 8, 23, 9, 30)),
         "bidDeadline": to_millis(datetime(2026, 8, 30, 9, 0)),
         "score": 1.5,
@@ -233,17 +235,49 @@ class CredentialTests(unittest.TestCase):
         self.assertIsNone(token_expires_at("not-a-jwt"))
 
 
+class BudgetUnitTests(unittest.TestCase):
+    """睿销的 budget 以分计，不是元（2026-09-05 用 09-02 单日窗口 8/8 实测）。"""
+
+    def test_cents_are_converted_to_yuan(self):
+        for raw, expected in (
+            (36000000, "360000"),    # 东胜区人民医院，正文 36.000000 万元
+            (1640000, "16400"),      # 哈医大六院 IgE 质控品，正文 16,400.00 元
+            (1875600, "18756"),      # BA400 校准品，正文 18,756.00 元
+            (30960000, "309600"),    # 昆明延安医院，正文 30.96 万元
+            (10000000, "100000"),    # AGENT_HANDOFF §3 里人工改正过的那条
+        ):
+            self.assertEqual(normalize_budget(raw), expected, raw)
+
+    def test_fractional_yuan_keeps_two_decimals(self):
+        self.assertEqual(normalize_budget(123456), "1234.56")
+
+    def test_missing_or_zero_budget_stays_empty(self):
+        for raw in (None, "", 0, -1, "abc"):
+            self.assertEqual(normalize_budget(raw), "")
+
+
 class PrefilterTests(unittest.TestCase):
     """passes_prefilter 返回 screen_domain 的结果 dict，不是 bool。"""
 
     def test_target_category_passes(self):
         self.assertTrue(passes_prefilter(sample_item())["keep"])
 
-    def test_excluded_category_in_title_is_rejected(self):
-        item = sample_item(title="过敏原检测试剂及酶标仪采购", product="酶标仪")
+    def test_excluded_category_qualifying_the_same_item_is_rejected(self):
+        """排除词是同一个标的的限定语时照旧丢：整条公告就不是本司的东西。"""
+        item = sample_item(title="兽用过敏原检测试剂采购", product="兽用过敏原检测试剂")
         screen = passes_prefilter(item)
         self.assertFalse(screen["keep"])
-        self.assertIn("酶标仪", screen["reason"])
+        self.assertIn("兽用", screen["reason"])
+
+    def test_excluded_category_parallel_to_ours_in_title_keeps_candidate(self):
+        """标题层混合包不再连坐：并列的两个标的里有一个是本司的，就得留给核实阶段。
+
+        原型是 2026-09-05 实测漏掉的南医大二附院那条（screen_domain 的注释有全称）。
+        """
+        item = sample_item(title="过敏原检测试剂及酶标仪采购", product="过敏原检测试剂,酶标仪")
+        screen = passes_prefilter(item)
+        self.assertTrue(screen["keep"])
+        self.assertEqual(screen["title_exclude_term"], "酶标仪")
 
     def test_exclude_term_only_in_product_list_keeps_candidate(self):
         """`product` 是清单，属正文域：混合包不再被里面的一台 PCR 仪带走。

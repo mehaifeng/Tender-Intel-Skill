@@ -7,7 +7,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from ccgp_search import (  # noqa: E402
+    CCGPClient,
     CCGPError,
+    CCGPNetworkError,
     collect,
     parse_detail_page,
     parse_query_list,
@@ -178,6 +180,51 @@ class CCGPParserTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertTrue(candidates[0]["retrieval_verified"])
         self.assertEqual(len(failures), 1)
+
+
+class CCGPRetryTests(unittest.TestCase):
+    """瞬时超时退避重试：2026-09-05 实测 85 条 Query 超时 10 条，重跑全部成功。"""
+
+    def _client(self, outcomes):
+        client = CCGPClient(delay=0)
+        client.RETRY_BACKOFF_SECONDS = 0
+        self.calls = []
+
+        def fake_get_once(url, referer):
+            self.calls.append(url)
+            result = outcomes.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        client._get_once = fake_get_once
+        return client
+
+    def test_transient_timeout_is_retried_and_succeeds(self):
+        client = self._client([
+            CCGPNetworkError("网络错误：The read operation timed out"),
+            "<html>ok</html>",
+        ])
+        self.assertEqual(client.get("https://search.ccgp.gov.cn/bxsearch?kw=x"), "<html>ok</html>")
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(client.retried_requests, 1)
+
+    def test_retries_are_capped_then_the_failure_surfaces(self):
+        client = self._client([CCGPNetworkError("网络错误：timed out")] * 3)
+        with self.assertRaises(CCGPError):
+            client.get("https://search.ccgp.gov.cn/bxsearch?kw=x")
+        self.assertEqual(len(self.calls), CCGPClient.NETWORK_RETRIES + 1)
+
+    def test_rate_limit_page_is_never_retried(self):
+        """「访问过于频繁」重试只会加重限流，必须一次就停。"""
+        client = self._client([
+            CCGPError("中国政府采购网返回访问频繁页；本轮停止，不连续重试"),
+            "<html>ok</html>",
+        ])
+        with self.assertRaises(CCGPError):
+            client.get("https://search.ccgp.gov.cn/bxsearch?kw=x")
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(client.retried_requests, 0)
 
 
 if __name__ == "__main__":

@@ -16,13 +16,19 @@ from search_common import (  # noqa: E402
     plap_notice_id,
     signal_tier,
     target_category_signals,
+    title_fingerprint,
+    title_is_truncated,
+    title_mixed_bundle_term,
     write_candidates,
 )
 from tender_pipeline import (  # noqa: E402
+    cluster_candidates,
     historical_identity_keys,
     canonicalize_create,
-    historical_identity_keys,
+    compose_summary,
     procedural_notice,
+    title_identity,
+    title_identity_duplicate,
 )
 
 
@@ -510,3 +516,215 @@ class MixedBundleScreeningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TitleScopeMixedBundleTests(unittest.TestCase):
+    """标题层混合包：排除词与本司品类并列时不再连坐（2026-09-05 实测）。"""
+
+    NANYIDA = ("南医大二附院关于哥伦比亚血琼脂培养基等（7种培养基）、"
+               "抗β2糖蛋白1IgG等（5种）试剂盒采购项目的遴选公告（第二次）")
+
+    def test_parallel_items_in_title_survive(self):
+        screen = screen_domain(self.NANYIDA, "")
+        self.assertTrue(screen["keep"])
+        self.assertEqual(screen["signals"], ["抗磷脂谱"])
+        self.assertEqual(screen["title_exclude_term"], "培养基")
+
+    def test_qualifier_on_the_same_item_still_drops(self):
+        """排除词修饰的就是那一个标的时，整条仍然不是本司的东西。"""
+        for title in ("兽用自身抗体检测试剂",
+                      "结核分枝杆菌特异性细胞因子检测试剂盒配送服务项目招标公告"):
+            screen = screen_domain(title, "")
+            self.assertFalse(screen["keep"], title)
+            self.assertIn("硬排除词", screen["reason"], title)
+
+    def test_single_segment_is_never_a_mixed_bundle(self):
+        self.assertEqual(title_mixed_bundle_term("兽用自身抗体检测试剂"), "")
+        self.assertEqual(title_mixed_bundle_term(self.NANYIDA), "培养基")
+
+    def test_clean_title_carries_no_title_exclude_term(self):
+        screen = screen_domain("某某医院过敏原特异性IgE检测试剂采购公告", "")
+        self.assertTrue(screen["keep"])
+        self.assertEqual(screen["title_exclude_term"], "")
+
+
+class TitleFingerprintTests(unittest.TestCase):
+    """标题指纹要抹掉聚合站加的壳和来源截断，否则同一条公告在两个平台是两个身份。"""
+
+    def test_channel_tags_are_stripped(self):
+        for tagged, plain in (
+            ("【调查公告】柳州市柳铁中心医院免疫球蛋白G4测定试剂盒采购项目市场调查公告",
+             "柳州市柳铁中心医院免疫球蛋白G4测定试剂盒采购项目市场调查公告"),
+            ("[政采云]某某医院检验科抗核抗体IgG及相关试剂采购项目公开招标公告",
+             "某某医院检验科抗核抗体IgG及相关试剂采购项目公开招标公告"),
+            ("【院务公开】阿拉善盟中心医院实验室设备配置项目招标公告",
+             "阿拉善盟中心医院实验室设备配置项目招标公告"),
+        ):
+            self.assertEqual(title_fingerprint(tagged), title_fingerprint(plain), tagged)
+
+    def test_round_brackets_are_not_stripped(self):
+        """圆括号在中文标题里是内容的一部分，剥掉会把不同轮次混成一条。"""
+        self.assertNotEqual(
+            title_fingerprint("（第二次）某某医院过敏原试剂采购公告"),
+            title_fingerprint("某某医院过敏原试剂采购公告"),
+        )
+
+    def test_truncated_title_fingerprint_is_a_prefix_of_the_full_one(self):
+        truncated = ("右江民族医学院附属医院设备采购院内市场调研报名公告"
+                     "第D001-09.08期市场调研（全自动体外过敏原检测系…")
+        full = ("右江民族医学院附属医院设备采购院内市场调研报名公告"
+                "第D001-09.08期市场调研（全自动体外过敏原检测系统）")
+        self.assertTrue(title_is_truncated(truncated))
+        self.assertFalse(title_is_truncated(full))
+        self.assertTrue(title_fingerprint(full).startswith(title_fingerprint(truncated)))
+
+
+class LooseIdentityTests(unittest.TestCase):
+    """严格键覆盖不到的两类同一公告（tender_pipeline.title_identity_duplicate）。"""
+
+    def _identity(self, title, date="2026-09-02", buyer=""):
+        identity = title_identity(title, date, buyer)
+        self.assertIsNotNone(identity)
+        return identity
+
+    def test_ledger_without_buyer_still_blocks(self):
+        """飞书导入的瘦记录只有标题/链接/发布时间，不能因此整批失效。"""
+        known = [self._identity("柳州市柳铁中心医院试剂耗材一批采购项目市场调查公告")]
+        candidate = self._identity(
+            "【调查公告】柳州市柳铁中心医院试剂耗材一批采购项目市场调查公告",
+            buyer="柳州市柳铁中心医院",
+        )
+        self.assertTrue(title_identity_duplicate(candidate, known))
+
+    def test_two_known_and_different_buyers_stay_distinct(self):
+        """2533a54 加采购人维度要防的情形不受影响。"""
+        known = [self._identity("医用耗材公开遴选公告", buyer="甲医院")]
+        candidate = self._identity("医用耗材公开遴选公告", buyer="乙医院")
+        self.assertFalse(title_identity_duplicate(candidate, known))
+
+    def test_truncated_candidate_matches_full_ledger_title(self):
+        known = [self._identity(
+            "右江民族医学院附属医院设备采购院内市场调研报名公告"
+            "第D001-09.08期市场调研（全自动体外过敏原检测系统）",
+            buyer="右江民族医学院附属医院",
+        )]
+        candidate = self._identity(
+            "右江民族医学院附属医院设备采购院内市场调研报名公告"
+            "第D001-09.08期市场调研（全自动体外过敏原检测系…",
+            buyer="右江民族医学院附属医院",
+        )
+        self.assertTrue(title_identity_duplicate(candidate, known))
+
+    def test_sibling_batches_are_not_prefix_duplicates(self):
+        """同院同日的第77批/第78批谁也不是谁的前缀，也都没被截断。"""
+        known = [self._identity(
+            "黑龙江省神经精神病医院2026年度政府采购意向公告(第77批)", buyer="黑龙江省第三医院")]
+        candidate = self._identity(
+            "黑龙江省神经精神病医院2026年度政府采购意向公告(第78批)", buyer="黑龙江省第三医院")
+        self.assertFalse(title_identity_duplicate(candidate, known))
+
+    def test_prefix_without_truncation_marker_is_not_a_duplicate(self):
+        """没有省略号就不是来源截断，短标题不能白白吃掉长标题。"""
+        known = [self._identity("某某医院检验试剂采购公告及配套服务", buyer="某某医院")]
+        candidate = self._identity("某某医院检验试剂采购公告", buyer="某某医院")
+        self.assertFalse(title_identity_duplicate(candidate, known))
+
+    def test_cross_platform_repost_within_the_window_matches(self):
+        """省级交易网先发、CCGP 地方公告隔天转载：链接和公告号都对不上，只剩标题。"""
+        known = [self._identity(
+            "[政采云]新疆维吾尔自治区人民医院白鸟湖医院检验科抗核抗体IgG及相关试剂采购项目二次公开招标公告",
+            "2026-09-03", "新疆维吾尔自治区人民医院白鸟湖医院")]
+        candidate = self._identity(
+            "新疆维吾尔自治区人民医院白鸟湖医院检验科抗核抗体IgG及相关试剂采购项目二次公开招标公告",
+            "2026-09-04", "新疆维吾尔自治区人民医院白鸟湖医院")
+        self.assertIn("跨平台转载", title_identity_duplicate(candidate, known))
+
+    def test_repost_window_does_not_stretch_to_a_later_reissue(self):
+        known = [self._identity("某某医院过敏原试剂采购公告", "2026-09-02", "某某医院")]
+        candidate = self._identity("某某医院过敏原试剂采购公告", "2026-09-20", "某某医院")
+        self.assertFalse(title_identity_duplicate(candidate, known))
+
+    def test_repost_window_needs_an_identical_fingerprint(self):
+        """隔天转载只认完全相同的标题；前缀关系不跨日期放行。"""
+        known = [self._identity(
+            "某某医院检验试剂采购公告及配套服务", "2026-09-02", "某某医院")]
+        candidate = self._identity(
+            "某某医院检验试剂采购公告…", "2026-09-03", "某某医院")
+        self.assertFalse(title_identity_duplicate(candidate, known))
+
+
+class IntentSummaryClusterTests(unittest.TestCase):
+    """采购意向的汇总页与项目明细页是同一件事，不该推两遍。"""
+
+    def _candidate(self, cid, title, buyer, priority=300, date="2026-09-02"):
+        return {
+            "candidate_id": cid,
+            "title": title,
+            "title_fingerprint": title_fingerprint(title),
+            "url": f"https://example.gov.cn/{cid}",
+            "publish_time": date,
+            "source_priority": priority,
+            "source_fields": {"单位": buyer},
+        }
+
+    def test_intent_summary_merges_into_the_detail_page(self):
+        rows = cluster_candidates([
+            self._candidate(
+                "C1", "鄂尔多斯市东胜区人民医院2026年09月至2026年10月政府采购意向",
+                "鄂尔多斯市东胜区人民医院"),
+            self._candidate(
+                "C2",
+                "鄂尔多斯市东胜区人民医院2026年09月至2026年10月政府采购意向-医疗设备采购项目 详细情况",
+                "鄂尔多斯市东胜区人民医院"),
+        ])
+        self.assertEqual(len(rows), 1)
+        # 代表取标题更长的明细页：预算与具体标的都在那一条上。
+        self.assertEqual(rows[0]["candidate_id"], "C2")
+        self.assertEqual(sorted(rows[0]["cluster_members"]), ["C1", "C2"])
+
+    def test_different_notice_families_are_never_merged(self):
+        """SKILL 明确禁止合并同一项目的不同阶段，前缀关系也不行。"""
+        rows = cluster_candidates([
+            self._candidate("C1", "某某医院过敏原试剂采购公告", "某某医院"),
+            self._candidate("C2", "某某医院过敏原试剂采购公告更正公告", "某某医院"),
+        ])
+        self.assertEqual(len(rows), 2)
+
+    def test_different_buyers_are_never_merged(self):
+        rows = cluster_candidates([
+            self._candidate("C1", "某某医院2026年政府采购意向", "甲医院"),
+            self._candidate("C2", "某某医院2026年政府采购意向-检验设备 详细情况", "乙医院"),
+        ])
+        self.assertEqual(len(rows), 2)
+
+    def test_unknown_buyer_disables_prefix_merging(self):
+        rows = cluster_candidates([
+            self._candidate("C1", "某某医院2026年政府采购意向", ""),
+            self._candidate("C2", "某某医院2026年政府采购意向-检验设备 详细情况", ""),
+        ])
+        self.assertEqual(len(rows), 2)
+
+
+class SummaryCompositionTests(unittest.TestCase):
+    """推送摘要不许出现 `【标的清单】null`（2026-09-05 实测 12 条载荷里 4 条中招）。"""
+
+    def test_missing_product_list_adds_nothing(self):
+        """只有睿销供 product_list，CCGP/PLAP 候选一律是空。"""
+        for empty in ("", None, "null", "   "):
+            self.assertEqual(compose_summary("项目概况：某某医院检验试剂采购", empty),
+                             "项目概况：某某医院检验试剂采购")
+
+    def test_product_list_is_appended_when_present(self):
+        summary = compose_summary("正文详见附件", "抗核抗体测定试剂盒,免疫印迹仪")
+        self.assertEqual(summary, "正文详见附件 【标的清单】抗核抗体测定试剂盒,免疫印迹仪")
+
+    def test_empty_summary_does_not_leak_the_null_placeholder(self):
+        summary = compose_summary("", "抗核抗体测定试剂盒")
+        self.assertEqual(summary, "【标的清单】抗核抗体测定试剂盒")
+
+    def test_product_list_already_in_summary_is_not_repeated(self):
+        summary = compose_summary("采购内容：抗核抗体测定试剂盒", "抗核抗体测定试剂盒")
+        self.assertEqual(summary, "采购内容：抗核抗体测定试剂盒")
+
+    def test_both_empty_stays_null(self):
+        self.assertEqual(compose_summary("", ""), "null")

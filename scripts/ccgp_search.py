@@ -37,6 +37,10 @@ class CCGPError(Exception):
     pass
 
 
+class CCGPNetworkError(CCGPError):
+    """网络层瞬时故障（超时、连接重置）。只有这一类值得退避重试。"""
+
+
 def parse_query_list():
     text = REFERENCE_FILE.read_text(encoding="utf-8")
     marker = "## 检索 Query 清单"
@@ -94,13 +98,33 @@ def build_search_url(query, start, end, page):
 
 
 class CCGPClient:
+    # 偶发 `read operation timed out` 是这个站的常态：2026-09-05 跑 09-02 单日窗口，
+    # 85 条 Query 超时 10 条（约 12% 的召回直接丢掉），重跑同样的词全部一次成功。
+    # 因此只对**网络层瞬时故障**退避重试，且次数很少：HTTP 状态码错误、
+    # 「访问过于频繁」页和响应体超限都不重试——那三类重试只会加重限流。
+    NETWORK_RETRIES = 2
+    RETRY_BACKOFF_SECONDS = 4.0
+
     def __init__(self, delay=2.0, timeout=30):
         self.opener = build_opener(HTTPCookieProcessor(CookieJar()))
         self.delay = max(0.0, float(delay))
         self.timeout = timeout
         self.last_request_at = 0.0
+        self.retried_requests = 0
 
     def get(self, url, referer="https://www.ccgp.gov.cn/"):
+        last_error = None
+        for attempt in range(self.NETWORK_RETRIES + 1):
+            if attempt:
+                self.retried_requests += 1
+                time.sleep(self.RETRY_BACKOFF_SECONDS * attempt)
+            try:
+                return self._get_once(url, referer)
+            except CCGPNetworkError as exc:
+                last_error = exc
+        raise CCGPError(str(last_error))
+
+    def _get_once(self, url, referer):
         wait = self.delay - (time.monotonic() - self.last_request_at)
         if wait > 0:
             time.sleep(wait)
@@ -126,7 +150,7 @@ class CCGPClient:
         except HTTPError as exc:
             raise CCGPError(f"HTTP {exc.code}: {url}") from exc
         except (URLError, TimeoutError, OSError) as exc:
-            raise CCGPError(f"网络错误：{exc}") from exc
+            raise CCGPNetworkError(f"网络错误：{exc}") from exc
         finally:
             self.last_request_at = time.monotonic()
         if "您的访问过于频繁" in text or "频繁访问!中国政府采购网" in text:
@@ -564,8 +588,9 @@ def main():
         out_dir = Path(args.out_dir) if args.out_dir else ROOT / ".tmp" / "search" / date.today().isoformat() / ".sources" / "ccgp"
         out_dir.mkdir(parents=True, exist_ok=True)
         started = time.time()
+        client = CCGPClient(delay=args.delay)
         candidates, failures, raw_count = collect(
-            CCGPClient(delay=args.delay), queries, start, end, args.max_pages_per_query
+            client, queries, start, end, args.max_pages_per_query
         )
         index = write_candidates(candidates, out_dir, date.today().isoformat())
         summary = {
@@ -577,6 +602,8 @@ def main():
             "query_failed": len({row.get("query") for row in failures if row.get("query")}),
             "raw_result_count": raw_count,
             "candidate_count": len(index),
+            # 退避重试掉的瞬时超时次数。非零说明这一趟本来会少召回同样多的 Query。
+            "network_retries": client.retried_requests,
             "failures": failures,
         }
         (out_dir / "search_summary.json").write_text(
@@ -584,7 +611,8 @@ def main():
         )
         print(
             f"CCGP：{len(queries)} 个单词 Query，原始 {raw_count} 条，"
-            f"按公告 URL 去重后 {len(index)} 条，失败 {len(failures)} 项，耗时 {time.time() - started:.1f}s"
+            f"按公告 URL 去重后 {len(index)} 条，失败 {len(failures)} 项，"
+            f"瞬时超时重试 {client.retried_requests} 次，耗时 {time.time() - started:.1f}s"
         )
         print(f"落盘：{out_dir}")
         return 0 if not failures or candidates else 2

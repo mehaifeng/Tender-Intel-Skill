@@ -136,8 +136,38 @@ def excluded_domain_term(text):
     return match.group(0) if match else ""
 
 
+# 标题里的并列分隔符。`和` 不收：中文地名与项目名里到处是它（和田地区、和美乡村），
+# 切错的代价是把一条本该丢的公告放进队列，不如不切。
+TITLE_SEGMENT_SPLIT_RE = re.compile(r"[、，,；;／/｜|]+|以及|及")
+
+
+def title_mixed_bundle_term(title_text):
+    """标题里的排除词与本司信号分处不同并列项时返回那个排除词，否则空串。
+
+    标题里排除词和本司品类同时出现有两种完全不同的成因，必须分开处置：
+
+    - **限定同一个标的**：`兽用自身抗体检测试剂`、`结核分枝杆菌特异性细胞因子检测
+      试剂盒`。排除词是那一个标的的定语，整条公告就不是本司的东西，照旧丢。
+    - **并列两个标的**：`南医大二附院关于哥伦比亚血琼脂培养基等（7种培养基）、
+      抗β2糖蛋白1IgG等（5种）试剂盒采购项目的遴选公告（第二次）`。这是标题层的
+      混合包——`培养基` 和 `抗β2糖蛋白1IgG`（抗磷脂谱）是分开招的两批标的，
+      连坐等于把本司那一批一起扔掉。2026-09-05 用 09-02 单日窗口实测到这一条真漏。
+
+    判据是并列分隔符：切开后只要存在一个「有本司信号、又没有排除词」的片段，
+    就按混合包处理。片段只有一个时不成立——那就是限定语的情形。
+    """
+    title_text = title_text or ""
+    segments = [seg for seg in TITLE_SEGMENT_SPLIT_RE.split(title_text) if seg.strip()]
+    if len(segments) < 2:
+        return ""
+    for segment in segments:
+        if target_category_signals(segment) and not excluded_domain_term(segment):
+            return excluded_domain_term(title_text)
+    return ""
+
+
 def screen_domain(title_text, body_text=""):
-    """三来源共用的产品域预筛，返回 dict(keep/reason/signals/body_exclude_term)。
+    """三来源共用的产品域预筛，返回 dict(keep/reason/signals/title_exclude_term/body_exclude_term)。
 
     `title_text` 是「这条公告是关于什么的」——标题，以及标题派生的产品词。
     `body_text` 是设备与试剂清单——正文、摘要，以及把全部标的拉平成一串的
@@ -156,15 +186,32 @@ def screen_domain(title_text, body_text=""):
     「无目标品类信号」丢掉——正文域的硬排除本来就与那一条冗余，唯一独立生效的
     场合正是上面这类误杀。正文域命中的词随候选带出，写进
     `search_evidence.body_exclude_term`，让核实阶段知道这是混合包。
+
+    **标题域的硬排除，只在排除词与本司品类不是并列标的时才生效。** 2026-09-05 用
+    09-02 单日窗口实测，`南医大二附院关于哥伦比亚血琼脂培养基等（7种培养基）、
+    抗β2糖蛋白1IgG等（5种）试剂盒采购项目的遴选公告（第二次）` 被 `培养基` 杀在
+    标题域——可同一个标题里就写着 `抗β2糖蛋白1IgG`（抗磷脂谱）。混合包不只发生在
+    正文清单里，标题本身就可能是「A类若干、B类若干」的并列写法。
+
+    但不能简单改成「标题有本司信号就不丢」：`兽用自身抗体检测试剂`、`结核分枝杆菌
+    特异性细胞因子检测试剂盒` 里的排除词是**同一个标的的限定语**，那两条确实不是
+    本司的东西。区分交给 `title_mixed_bundle_term()`：按并列分隔符切开标题，
+    存在「有本司信号、无排除词」的片段才算混合包。混合包保留，命中的词写进
+    `title_exclude_term` 交给核实阶段；其余照旧丢。
+
+    纯粹的别域标题不受影响——`河南省疾病预防控制中心"华大智造基因测序仪"配套测序
+    试剂采购项目` 切开后没有任何片段带本司信号，仍然被 `测序` 丢掉。
     """
     title_text = title_text or ""
     body_text = body_text or ""
-    term = excluded_domain_term(title_text)
-    if term:
+    title_term = excluded_domain_term(title_text)
+    mixed_bundle_term = title_mixed_bundle_term(title_text) if title_term else ""
+    if title_term and not mixed_bundle_term:
         return {
             "keep": False,
-            "reason": f"标题命中非本司产品域硬排除词：{term}",
+            "reason": f"标题命中非本司产品域硬排除词：{title_term}",
             "signals": [],
+            "title_exclude_term": "",
             "body_exclude_term": "",
         }
     signals = target_category_signals("\n".join((title_text, body_text)))
@@ -173,12 +220,14 @@ def screen_domain(title_text, body_text=""):
             "keep": False,
             "reason": "标题、摘要和搜索正文均无目标品类信号",
             "signals": [],
+            "title_exclude_term": "",
             "body_exclude_term": "",
         }
     return {
         "keep": True,
         "reason": "",
         "signals": signals,
+        "title_exclude_term": mixed_bundle_term,
         "body_exclude_term": excluded_domain_term(body_text),
     }
 
@@ -233,8 +282,37 @@ def compact_text(value, limit=None):
     return text
 
 
+# 聚合站给标题加的栏目/来源标签，不属于公告身份：睿销把柳铁那条存成
+# 「【调查公告】柳州市柳铁中心医院…」，人工台账里同一条没有这个壳；白鸟湖那条在
+# 新疆公共资源网叫「[政采云]…」，在 CCGP 地方公告就没有前缀。不剥这层壳，同一条
+# 公告在两个平台上就是两个身份，去重必漏（2026-09-05 实测）。
+# 只认方头/中文方头括号：圆括号在中文标题里常常是内容的一部分（「（第二次）」），
+# 剥掉会把不同轮次的公告混成一条。
+TITLE_TAG_RE = re.compile(r"^\s*[【\[][^】\]]{1,10}[】\]]\s*")
+# 睿销的列表与详情接口都把标题截断在 54 字并以省略号收尾（titleProduct、product
+# 同样被截，回源前拿不到完整标题）。指纹里去掉省略号，截断标题的指纹才会是完整
+# 标题指纹的**前缀**，tender_pipeline 的前缀判重才有意义。
+TITLE_ELLIPSIS_RE = re.compile(r"(?:\.{3,}|。{3,}|[…⋯]+)\s*$")
+
+
+def strip_title_tags(title):
+    """剥掉标题开头的一层层栏目标签，直到没有为止。"""
+    text = str(title or "").strip()
+    while True:
+        stripped = TITLE_TAG_RE.sub("", text, count=1)
+        if stripped == text or not stripped:
+            return text
+        text = stripped
+
+
+def title_is_truncated(title):
+    """标题被来源截断（以省略号收尾），指纹只能当前缀用。"""
+    return bool(TITLE_ELLIPSIS_RE.search(str(title or "")))
+
+
 def title_fingerprint(title):
-    return re.sub(r"[\s\W_]+", "", (title or "").lower(), flags=re.UNICODE)
+    text = TITLE_ELLIPSIS_RE.sub("", strip_title_tags(title))
+    return re.sub(r"[\s\W_]+", "", text.lower(), flags=re.UNICODE)
 
 
 def canonical_url(raw):

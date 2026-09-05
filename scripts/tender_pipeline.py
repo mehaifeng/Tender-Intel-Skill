@@ -13,7 +13,7 @@ import os
 import re
 import sys
 import tempfile
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from hospital_match import get_default_index
@@ -26,6 +26,7 @@ from search_common import (
     non_hospital_buyer,
     signal_tier,
     title_fingerprint as common_title_fingerprint,
+    title_is_truncated as common_title_is_truncated,
 )
 
 
@@ -86,7 +87,12 @@ DATETIME_RE = re.compile(r"^20\d{2}-[01]\d-[0-3]\d(?:T[0-2]\d:[0-5]\d(?::[0-5]\d
 BUDGET_RE = re.compile(r"^\d+(?:\.\d+)?$")
 PROCUREMENT_INTENT_RE = re.compile(
     r"招标|采购|询价|磋商|谈判|比选|遴选|竞价|议价|单一来源|"
-    r"中标|成交|合同|采购意向|需求调查|市场调研|参数征集|供应商征集|"
+    # `调研`（含原来的 `市场调研`）、`试剂`、`耗材` 是 2026-09-05 用 09-02 单日窗口补的：
+    # 聚合站常把标题存成「项目编号+单位+科室+品类」，一个动词都没有。
+    # `Q53A00326001687昆明市延安医院检验科检验试剂（免疫组）`（自免肝抗体谱/抗胃壁细胞/
+    # 抗内因子，30.96 万，投标截止 09-24）和 `医疗设备调研公告(DY202639第二次)`
+    # （汕头大学医学院第一附属医院，清单含全自动免疫印迹仪）都是这样被这道门丢掉的。
+    r"中标|成交|合同|采购意向|需求调查|调研|试剂|耗材|参数征集|供应商征集|"
     r"结果公示|候选人公示|废标|流标|更正|变更|终止|撤销",
     re.I,
 )
@@ -204,6 +210,29 @@ def normalize_url(raw):
     return canonical_url(raw)
 
 
+SUMMARY_LIMIT = 2000
+SUMMARY_WITH_PRODUCT_LIMIT = 2400
+
+
+def compose_summary(summary, product_list):
+    """推送用的「内容（检索的摘要）」：正文摘要，必要时接上来源自带的标的清单。
+
+    正文写「详见附件」「下载」时摘要里一个标的都没有，推出去销售无从判断相关性；
+    清单本来就是这类公告唯一能定品类的内容，所以接在后面。
+
+    **本模块的 `compact_text` 对空值返回字符串 `"null"`**（Webhook 十六字段全字符串、
+    不许出现 JSON null），所以这里必须显式比 `"null"`，不能只看真值——只有睿销供
+    `product_list`，CCGP/PLAP 候选一律是空，2026-09-05 实测因此给每条 CCGP 载荷的
+    摘要都缀上了一句 `【标的清单】null`。
+    """
+    summary = compact_text(summary, limit=SUMMARY_LIMIT)
+    product_list = compact_text(product_list)
+    if product_list == "null" or product_list in summary:
+        return summary
+    parts = [part for part in (summary, "【标的清单】" + product_list) if part != "null"]
+    return compact_text(" ".join(parts), limit=SUMMARY_WITH_PRODUCT_LIMIT)
+
+
 def buyer_fingerprint(value):
     """采购人指纹：与标题指纹同口径，"null"/空值归一成空串。"""
     text = "" if value in (None, "", "null") else str(value)
@@ -240,6 +269,90 @@ def historical_identity_keys(title, url, publish_time, buyer=""):
     if len(fingerprint) >= 8 and date_match:
         keys.add(("title_date", fingerprint, date_match.group(0), buyer_fingerprint(buyer)))
     return keys
+
+
+# 截断标题按前缀判重时，指纹至少要有这么长才算数。太短的前缀（「某某医院」）
+# 在同一家医院同一天可以匹上任何一条公告。
+TRUNCATED_TITLE_MIN_FINGERPRINT = 16
+# 同一条公告在不同平台转载的日期差容忍度。省级公共资源交易网先发、CCGP 地方公告
+# 隔天转载是常态：白鸟湖那条抗核抗体标在新疆公共资源网是 09-03，在 CCGP 是 09-04，
+# 链接与公告号都对不上，只剩标题。**只对指纹完全相同的标题放这个窗口**，
+# 重发的公告几乎总会在标题里写「第二次」「二次」，指纹随之改变，不会落进来。
+REPOST_WINDOW_DAYS = 3
+
+
+def title_identity(title, publish_time, buyer):
+    """(标题指纹, 发布日期, 采购人指纹, 标题是否被来源截断)；缺日期或指纹太短返回 None。"""
+    fingerprint = common_title_fingerprint(title)
+    date_match = re.search(r"20\d{2}-[01]\d-[0-3]\d", str(publish_time or ""))
+    if len(fingerprint) < 8 or not date_match:
+        return None
+    return (
+        fingerprint,
+        date_match.group(0),
+        buyer_fingerprint(buyer),
+        common_title_is_truncated(title),
+    )
+
+
+def _buyers_compatible(one, other):
+    """采购人指纹相容：两边都知道时必须相等，任一边不知道时不作判据。"""
+    return not one or not other or one == other
+
+
+def _date_gap(one, other):
+    return abs((date.fromisoformat(one) - date.fromisoformat(other)).days)
+
+
+def _within_repost_window(one, other):
+    try:
+        return _date_gap(one, other) <= REPOST_WINDOW_DAYS
+    except ValueError:
+        return False
+
+
+def title_identity_duplicate(identity, known_identities):
+    """`historical_identity_keys` 的严格键覆盖不到的三类同一公告，返回理由或空串。
+
+    严格键要求「标题指纹 + 发布日期 + 采购人指纹」三项**全等**。实测有三类同一条
+    公告过不了这个等号，而它们都不该重推（2026-09-05 用 09-02 单日窗口回测）：
+
+    1. **一边不知道采购人。** `historical_identity_keys` 的注释说「采购人缺失时
+       退化成空指纹，等价于旧口径」——但空指纹在集合里是一个**具体值**，不是通配符，
+       所以只存了标题/链接/发布时间的瘦台账记录（飞书导入的那批）实际上匹配不上任何
+       带 `单位` 的候选，等于整批失效。这里按注释本来的意思实现：一边不知道就不拿
+       采购人当判据，两边都知道才要求相等。**两个已知且不同的采购人仍然判成两条**，
+       2533a54 加这一维要防的「同一模板标题撞成同一个键」不受影响。
+    2. **一边的标题被来源截断。** 睿销把标题砍在 54 字（见 search_common
+       的 TITLE_ELLIPSIS_RE），指纹只能是完整标题指纹的前缀。只在标题确实以省略号
+       收尾、指纹不短于 TRUNCATED_TITLE_MIN_FINGERPRINT、且发布日期与采购人相容时
+       才认前缀——三个条件叠起来，「…采购意向公告(第77批)」和「(第78批)」这类
+       同院同日的兄弟公告不会被误判：它们谁也不是谁的前缀，也都没被截断。
+    """
+    if identity is None:
+        return ""
+    fingerprint, publish_date, buyer, truncated = identity
+    for known_fp, known_date, known_buyer, known_truncated in known_identities:
+        if not _buyers_compatible(buyer, known_buyer):
+            continue
+        if known_date != publish_date:
+            # 3. **跨平台转载**：同一条公告先后挂在省级交易网和 CCGP 地方公告，
+            #    链接、公告号都不同，发布日期还差一两天。只认指纹完全相同的标题。
+            if known_fp == fingerprint and _within_repost_window(publish_date, known_date):
+                gap = _date_gap(publish_date, known_date)
+                return f"标题一致、发布时间相差 {gap} 天，判为跨平台转载"
+            continue
+        if known_fp == fingerprint:
+            if buyer and known_buyer:
+                continue  # 严格键已经覆盖，不重复计理由
+            return "标题与发布时间一致，且台账记录没有采购人可供区分"
+        if (truncated and len(fingerprint) >= TRUNCATED_TITLE_MIN_FINGERPRINT
+                and known_fp.startswith(fingerprint)):
+            return "来源截断的标题是台账标题的前缀，发布时间与采购人相容"
+        if (known_truncated and len(known_fp) >= TRUNCATED_TITLE_MIN_FINGERPRINT
+                and fingerprint.startswith(known_fp)):
+            return "台账里存的是被截断的标题，当前候选是它的完整写法"
+    return ""
 
 
 def compact_text(value, limit=None):
@@ -379,21 +492,69 @@ def load_candidate_content(candidate, search_dir):
     return path, data
 
 
+# 同一条采购意向常常同时出现汇总页和项目明细页：
+#   「鄂尔多斯市东胜区人民医院2026年09月至2026年10月政府采购意向」（分网汇总，12 个标的）
+#   「鄂尔多斯市东胜区人民医院2026年09月至2026年10月政府采购意向-医疗设备采购项目 详细情况」
+# 两个 URL、两个标题指纹，落到销售那里是同一件事推两遍。前者的指纹是后者的真前缀，
+# 但**只有前缀还不够**：还要求同一采购人、同一发布日期、同一公告族——不然
+# 「XX采购公告」和「XX采购公告更正公告」也是前缀关系，而 SKILL 明确禁止合并不同阶段。
+CLUSTER_PREFIX_MIN_FINGERPRINT = 16
+
+
+def _prefix_cluster_key(item, keys_seen):
+    """同院同日同族、标题指纹互为前缀时并入既有簇；返回要用的分组键。"""
+    fingerprint = item.get("title_fingerprint") or ""
+    if len(fingerprint) < CLUSTER_PREFIX_MIN_FINGERPRINT:
+        return None
+    buyer = buyer_fingerprint((item.get("source_fields") or {}).get("单位"))
+    if not buyer:
+        return None
+    publish_date = compact_text(item.get("publish_time"))[:10]
+    family = notice_family(item.get("title"))
+    for key, (known_fp, known_buyer, known_date, known_family) in keys_seen.items():
+        if known_buyer != buyer or known_date != publish_date or known_family != family:
+            continue
+        if known_fp.startswith(fingerprint) or fingerprint.startswith(known_fp):
+            return key
+    return None
+
+
 def cluster_candidates(candidates):
     groups = {}
     order = []
+    prefix_index = {}
     for item in candidates:
         key = item.get("title_fingerprint") or item["candidate_id"]
         if len(key) < 8:
             key = item["candidate_id"]
         if key not in groups:
-            groups[key] = []
-            order.append(key)
+            merged_into = _prefix_cluster_key(item, prefix_index)
+            if merged_into is not None:
+                key = merged_into
+            else:
+                groups[key] = []
+                order.append(key)
+                prefix_index[key] = (
+                    item.get("title_fingerprint") or "",
+                    buyer_fingerprint((item.get("source_fields") or {}).get("单位")),
+                    compact_text(item.get("publish_time"))[:10],
+                    notice_family(item.get("title")),
+                )
         groups[key].append(item)
 
     result = []
     for key in order:
         members = groups[key]
+        # 前缀合并进来的成员里，汇总页的标题更短、字段更空。代表取权威级别最高的；
+        # 同级别时取标题更长的那条——它才是带预算和具体标的的明细页。
+        members = sorted(
+            members,
+            key=lambda row: (
+                int(row.get("source_priority") or 0),
+                len(row.get("title_fingerprint") or ""),
+            ),
+            reverse=True,
+        )
         representative = members[0].copy()
         representative["cluster_members"] = [member["candidate_id"] for member in members]
         representative["alternate_sources"] = [
@@ -493,11 +654,17 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
     if not isinstance(seen_records, list):
         raise PipelineError(f"{seen_path}必须含records数组")
     known_keys = set()
+    known_identities = []
     for record in seen_records:
         known_keys.update(historical_identity_keys(
             record.get("标题"), seen_url(record), record.get("发布时间"),
             record.get("单位"),
         ))
+        identity = title_identity(
+            record.get("标题"), record.get("发布时间"), record.get("单位")
+        )
+        if identity:
+            known_identities.append(identity)
 
     queue = []
     already_seen = []
@@ -508,12 +675,20 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
     for item in clustered:
         # 采购人取候选索引里的 source_fields，它在 write_candidates 阶段就已落盘，
         # 这里还没到 load_candidate_content。
+        item_buyer = (item.get("source_fields") or {}).get("单位")
         item_keys = historical_identity_keys(
-            item.get("title"), item.get("url"), item.get("publish_time"),
-            (item.get("source_fields") or {}).get("单位"),
+            item.get("title"), item.get("url"), item.get("publish_time"), item_buyer,
         )
         if item_keys & known_keys:
             already_seen.append({**item, "skip_reason": "与已成功推送记录身份重复"})
+            continue
+        # 严格键之外的两类同一公告：台账缺采购人、来源截断标题（见 title_identity_duplicate）。
+        loose_reason = title_identity_duplicate(
+            title_identity(item.get("title"), item.get("publish_time"), item_buyer),
+            known_identities,
+        )
+        if loose_reason:
+            already_seen.append({**item, "skip_reason": f"与已成功推送记录身份重复（{loose_reason}）"})
             continue
         exclusion = is_clear_exclude(item.get("title", ""))
         if exclusion:
@@ -532,12 +707,7 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             continue
 
         content_path, content = load_candidate_content(item, search_dir)
-        summary = compact_text(content.get("summary"), limit=2000)
-        # 正文写「详见附件」「下载」时摘要里一个标的都没有，推出去销售无从判断相关性。
-        # 把来源自带的标的清单接在摘要后面——它本来就是这类公告唯一能定品类的内容。
-        product_list = compact_text(content.get("product_list"))
-        if product_list and product_list not in summary:
-            summary = compact_text(" ".join((summary, "【标的清单】" + product_list)), limit=2400)
+        summary = compose_summary(content.get("summary"), content.get("product_list"))
         search_text = "\n".join((item.get("title", ""), content.get("summary", ""), content.get("content", "")))
         # 统一层兜底：适配器各自的预筛只覆盖 jrbx 与 PLAP，CCGP 候选到这里才第一次
         # 过产品域筛选。硬排除只看标题，正文只打标记（search_common.screen_domain）。
@@ -579,6 +749,9 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             # 正文里同时出现的非本司产品域词。非排除依据——它只说明这是混合包，
             # 提示核实阶段确认本司品类那一两行是真的（verification.md「大宗混合包」）。
             "body_exclude_term": screen["body_exclude_term"],
+            # 标题里同时出现的非本司产品域词。标题已点名本司品类时不再丢弃，
+            # 但这说明标题本身就是并列混合包（「7种培养基、抗β2糖蛋白1IgG等5种试剂盒」）。
+            "title_exclude_term": screen.get("title_exclude_term", ""),
             "summary": summary,
             "content_path": item["content_path"],
             "content_sha256": sha256_file(content_path),
@@ -1208,11 +1381,18 @@ def record_push(run_dir, receipt_path):
     payload_keys = historical_identity_keys(
         payload.get("标题"), payload.get("链接"), payload.get("发布时间"), payload.get("单位")
     )
+    payload_identity = title_identity(
+        payload.get("标题"), payload.get("发布时间"), payload.get("单位")
+    )
     duplicate = next((
         record for record in records
         if payload_keys & historical_identity_keys(
             record.get("标题"), seen_url(record), record.get("发布时间"), record.get("单位")
         )
+        # 与 prepare 用同一口径，否则同一条公告会在台账里留下两行近似记录。
+        or title_identity_duplicate(payload_identity, [identity for identity in (
+            title_identity(record.get("标题"), record.get("发布时间"), record.get("单位")),
+        ) if identity])
     ), None)
     if duplicate:
         # 老版本 seen 记录没有后来新增的字段（如 项目编号）。缺键按一致处理，

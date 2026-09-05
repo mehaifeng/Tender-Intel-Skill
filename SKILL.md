@@ -54,7 +54,7 @@ python scripts/tender_search.py
 
 PLAP 使用匿名公开标题检索与低量公告类型枚举的混合策略。公开正文按`public_partial`处理，不声明完整；只有元数据时标记`metadata_only`。缺失字段填`"null"`，不得登录补采。细节见[军队采购网适配器](references/plap.md)。
 
-统一层在进入队列前按规范 URL、CCGP 公告数字 ID、PLAP公告ID、完整标题指纹、项目编号加公告阶段去重；官方一手来源（CCGP、PLAP，`source_priority` 400）优先于睿销聚合转载（300），同时保留各来源 query 归因和备用链接。睿销候选的链接已回源到原始站点，因此同一公告能与 CCGP 候选在规范 URL 层直接命中同一身份键。同一项目的招标、更正、中标、废标等不同阶段不得合并。CCGP 适配器细节见[中国政府采购网适配器](references/ccgp.md)。
+统一层在进入队列前按规范 URL、CCGP 公告数字 ID、PLAP公告ID、完整标题指纹、项目编号加公告阶段去重；同一采购意向的汇总列表页与项目明细页（标题指纹互为前缀、同采购人、同发布日、同公告族）并成一条，代表取权威级别最高、标题最长的那份；官方一手来源（CCGP、PLAP，`source_priority` 400）优先于睿销聚合转载（300），同时保留各来源 query 归因和备用链接。睿销候选的链接已回源到原始站点，因此同一公告能与 CCGP 候选在规范 URL 层直接命中同一身份键。同一项目的招标、更正、中标、废标等不同阶段不得合并。CCGP 适配器细节见[中国政府采购网适配器](references/ccgp.md)。
 
 建立轻量队列：
 
@@ -64,7 +64,7 @@ python scripts/tender_pipeline.py prepare --search-dir <检索目录> --batch-si
 
 离线任务必须显式传`--mode report-only`、`search-only`或`verify-only`。`prepare`会自动：
 
-- 按规范链接、CCGP公告ID、PLAP公告ID或“标题指纹+发布时间”排除已成功推送记录；
+- 按规范链接、CCGP公告ID、PLAP公告ID或“标题指纹+发布时间+采购人”排除已成功推送记录。标题指纹先剥掉聚合站加的栏目壳（`【调查公告】`、`[政采云]`）和来源截断的省略号；另有三类同一公告严格键对不上，由 `title_identity_duplicate()` 兜底：台账记录没存采购人（此时不拿采购人当判据）、睿销把标题截断在 54 字（按前缀比）、同一公告跨平台转载差一两天（指纹全等且不超过 `REPOST_WINDOW_DAYS` 天）；
 - 排除无招采意图和明显噪声标题；
 - **排除标的已有结论的公告**：中标/成交/结果、废标/流标/终止/撤销、采购合同。这些进核实产不出可行动情报，只白占批次；`更正`/`变更`保留，在售标的改截止时间或参数仍然可行动。计数单独记入摘要的`concluded`，明细落`pipeline/concluded.jsonl`；
 - **排除纯流程性公告**：开标（时间/地点）通知、开标记录、唱标、评标结果/报告、资格预审结果。可行动信息都在原招标公告里；同样让`更正`/`变更`优先；
@@ -158,7 +158,7 @@ Windows旧任务可继续使用字段与门禁一致的`scripts/send_webhook.ps1
 
 子串匹配决定了取词规则：**每行放宽到还能指代该项目的最短片段，宁可多捞、由核实阶段的模型判掉**（`红斑狼疮` 1 → `狼疮` 11，`免疫印迹仪` 33 → `印迹` 128，`类风湿` 62 → `风湿` 107）；前缀合并顺带省掉大量重复请求（15 个 IL 代号 → `IL-` 一条）。**筛选层必须跟着放宽到同一批片段**，否则宽词捞回来的公告在预筛就被扔掉，等于白捞——两侧由 `test_screening_accepts_every_broadened_query_form` 钉在一起。放宽的下限、实测数与被否决的过宽写法（`硬化` 8389、`胰岛` 425、`磷脂` 104）见 keywords.md。
 
-候选筛选走 `scripts/search_common.py` 的 `TARGET_CATEGORY_PATTERNS`（17 组，即两张表的谱系），**三来源共用一份**；排除词 `EXCLUDE_TERMS`（`酶标仪`、`电泳`、兽用/科研/核酸等）同样共用，**但只在标题域决定去留**：命中正文（含睿销的 `product` 清单字段）只写进 `search_evidence.body_exclude_term` 供核实阶段参考，不丢候选。三来源与统一层共用入口 `search_common.screen_domain()`。无差别连坐会把「过敏原/自免标的 + 一台 PCR 仪」的混合包整类打掉，2026-09-04 实测两天窗口因此漏掉 6 条真候选而同期只推送 2 条，明细见[关键词与Query](references/keywords.md)「排除词」。两张表以外的词——方法学、仪器、甲状腺等——既不检索也不算命中。
+候选筛选走 `scripts/search_common.py` 的 `TARGET_CATEGORY_PATTERNS`（17 组，即两张表的谱系），**三来源共用一份**；排除词 `EXCLUDE_TERMS`（`酶标仪`、`电泳`、兽用/科研/核酸等）同样共用，**但从不在正文域决定去留**：命中正文（含睿销的 `product` 清单字段）只写进 `search_evidence.body_exclude_term` 供核实阶段参考，不丢候选。命中标题一般丢，唯一例外是排除词与本司品类在标题里是**并列的两个标的**（`…（7种培养基）、抗β2糖蛋白1IgG等（5种）试剂盒…`），这时保留并写进 `search_evidence.title_exclude_term`；排除词只是同一标的的限定语时（`兽用自身抗体检测试剂`）照旧丢。三来源与统一层共用入口 `search_common.screen_domain()`。无差别连坐会把「过敏原/自免标的 + 一台 PCR 仪」的混合包整类打掉，2026-09-04 实测两天窗口因此漏掉 6 条真候选而同期只推送 2 条，2026-09-05 又在标题域测到同类的第 7 条，明细见[关键词与Query](references/keywords.md)「排除词」。两张表以外的词——方法学、仪器、甲状腺等——既不检索也不算命中。
 
 PLAP 的筛选压力全在候选侧：`screen_row()` 分「硬排除 / 无目标品类信号」两类丢弃，写入 `search_summary.json` 的 `prefilter_excluded_by_reason` 与 `query_survival`；剩下的候选是否真属本司产品域由模型在核实阶段判断，判据见[核验协议](references/verification.md)「产品域判断」。
 

@@ -37,8 +37,14 @@ CCGP 确实索引拉丁词（`PCR` 56、`DNA` 35、`HIV` 6、`ELISA` 4、`IgE` 4
 体量比睿销小一个量级（`过敏` 9 vs 136），冷门谱系整月为 0 是常态。
 
 **限速代价**：请求间隔 2 秒，85 条单轮检索约 5 分钟（不含详情页抓取）。CCGP 免费，无调用
-成本。实跑偶有单条 `read timed out`，按来源失败记进 `search_summary.json` 的 `failures`
-即可，不重试、不切代理。
+成本。
+
+**瞬时超时要退避重试**：`read operation timed out` 在这个站是常态，2026-09-05 跑 09-02
+单日窗口，85 条 Query 超时 10 条（约 12% 的召回直接丢掉），单独重跑同样的词全部一次成功。
+`CCGPClient.get()` 因此对 `CCGPNetworkError` 退避重试 `NETWORK_RETRIES` 次（4s、8s），
+次数记进 `search_summary.json` 的 `network_retries`。**只重试网络层瞬时故障**：HTTP 状态码
+错误、「访问过于频繁」页和响应体超限都不重试——那三类重试只会加重限流。重试用尽后仍按
+来源失败记进 `failures`，不切代理。
 
 ## 跨来源优先级
 
