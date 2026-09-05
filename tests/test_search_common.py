@@ -367,8 +367,38 @@ class HistoricalIdentityKeyTests(unittest.TestCase):
         keys = historical_identity_keys("某某医院过敏原检测试剂采购公告", "", "2026-09-03")
         self.assertNotIn("url", {kind for kind, *_ in keys})
         self.assertIn(
-            ("title_date", "某某医院过敏原检测试剂采购公告", "2026-09-03"), keys
+            ("title_date", "某某医院过敏原检测试剂采购公告", "2026-09-03", ""), keys
         )
+
+    def test_same_title_same_day_different_buyers_stay_distinct(self):
+        """「同标题+同日」单独不足以标识一条公告，必须带上采购人。
+
+        同一模板标题在不同医院同日发布是常见形态；只按标题+日期判重，会把一条
+        没推过的新公告当成重复静默丢掉。静默丢弃比重复推送危险得多。
+        """
+        a = historical_identity_keys(
+            "医用耗材公开遴选公告", "", "2026-09-03", "甲医院")
+        b = historical_identity_keys(
+            "医用耗材公开遴选公告", "", "2026-09-03", "乙医院")
+        self.assertFalse(a & b)
+
+    def test_same_notice_still_matches_across_sources(self):
+        """同一条公告换个来源（链接不同）仍靠标题+日期+采购人判重。"""
+        pushed = historical_identity_keys(
+            "阿拉善盟中心医院实验室设备配置项目招标公告",
+            "https://www.ccgp.gov.cn/cggg/dfgg/gkzb/202609/t20260903_27263538.htm",
+            "2026-09-03", "阿拉善盟中心医院")
+        recalled = historical_identity_keys(
+            "阿拉善盟中心医院实验室设备配置项目招标公告",
+            "https://www.jrbx.com/article/detail?id=ABC&year=2026",
+            "2026-09-03", "阿拉善盟中心医院")
+        self.assertTrue(pushed & recalled)
+
+    def test_missing_buyer_degrades_to_old_behaviour(self):
+        """采购人缺失时退化成空指纹，等价旧口径——老记录不会因为加维度而失效。"""
+        a = historical_identity_keys("某医院过敏原试剂采购公告", "", "2026-09-03")
+        b = historical_identity_keys("某医院过敏原试剂采购公告", "", "2026-09-03", "null")
+        self.assertTrue(a & b)
 
     def test_two_blank_link_records_stay_distinct(self):
         a = historical_identity_keys("甲医院过敏原试剂采购公告", "", "2026-09-03")

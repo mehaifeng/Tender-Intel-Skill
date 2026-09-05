@@ -6,12 +6,13 @@ screening, pushing, or `data/seen.json`.
 ## 0. STATE AT HANDOFF
 
 - branch: `feat/rewrite-keyword-tables`
-- tests: 159 pass (`python -m unittest discover -s tests`)
+- tests: 162 pass (`python -m unittest discover -s tests`)
 - committed on `feat/rewrite-keyword-tables` as `c57ea22`. **Not pushed** —
   `git push` was denied by the sandbox permission classifier; the user must run
   it (or grant the permission). Branch is 1 ahead of origin. See §5.
 - pushes made this session: 3 (all HTTP 200 + feishu `code: 0`, receipts recorded,
-  `data/seen.json` 78 -> 81, then 81 -> 387 by the Feishu CSV import, see §4.1)
+  `data/seen.json` 78 -> 81, then 81 -> 387 by the Feishu CSV import (§4.1),
+  then -> 380 after the 2-month prune (§4.1b))
 
 ## 1. WHAT WAS BROKEN
 
@@ -195,6 +196,44 @@ search dir moved `already_seen` 7 -> 10 and left 0 unjudged candidates in the qu
 
 If another Feishu export is imported later, reuse `url_is_trustworthy` — do not
 trust the `链接` column blindly.
+
+### 4.1b DONE — seen.json slimmed, pruned, and given a buyer dimension (2026-09-05)
+
+Three changes, all landed:
+
+1. `内容（检索的摘要）` is no longer stored (`tender_pipeline.SEEN_OMITTED_FIELDS`).
+   It was 39% of ledger bytes and contributes nothing to dedup.
+2. Ledger keeps only the last ~2 months, by `发布时间` falling back to `_first_seen`.
+   Search windows are 72h, so older notices can never be recalled.
+3. `historical_identity_keys` gained a 4th positional arg `buyer`; the `title_date`
+   key is now `(fp(title), date, fp(buyer))`. Without it, a template title reused by
+   two hospitals on the same day collides and a never-pushed notice is dropped
+   silently. Strictness is deliberate: an inconsistent buyer string costs one
+   duplicate push (visible); a collision costs a missed opportunity (invisible).
+   All 4 call sites pass it (2 in `prepare`, 2 in `record_push`); candidates read it
+   from `item["source_fields"]["单位"]`, which is already in the candidate index at
+   that point (before `load_candidate_content`).
+
+Ledger after migration: 387 -> 380 records, 334 KB -> 213 KB (575 B/record),
+0 records still carrying a summary, 357/380 carrying `单位`.
+
+**The buyer dimension is computed at compare time, not frozen at write time**, so
+it applies to old records too — but only if they actually store `单位`. The 306
+CSV-imported records stored only 3 fields, so `单位` was backfilled from the CSV
+(303 filled) and hand-set on the 2 alias records. Re-verified after migration: all
+5 pipeline-side identities for the manually-posted notices, plus this session's own
+3 pushes, are still blocked; a `prepare` re-run gives the same counts as before
+(`already_seen` 10, `queued` 17), i.e. the added dimension broke no existing dedup.
+
+23 records still have no `单位` (15 pipeline records where 单位 was verified as
+`null`, 8 imported rows whose Feishu 单位 cell was empty). They emit an empty buyer
+fingerprint, i.e. old behaviour. Worst case each costs one duplicate push.
+
+`.gitignore` no longer lists `data/seen.json`. The entry claimed the ledger was kept
+as an empty skeleton via `git update-index --skip-worktree`, but that bit was never
+set (`git ls-files -v` showed `H`) and 652ec73 / c57ea22 both committed the full
+ledger. Current practice: seen.json is tracked and every commit carries the latest
+business intel.
 
 ### 4.2 MEDIUM — `变应原皮肤点刺液` product scope unresolved
 

@@ -40,6 +40,10 @@ WEBHOOK_FIELDS = [
     "预算", "采购方式", "科室", "命中关键词", "内容（检索的摘要）", "链接",
     "医院全名", "医院等级",
 ]
+
+# 推送成功后不写进 seen.json 的业务字段：对去重无用，只会让台账无限膨胀。
+# record_push 的重复判定用 `field not in duplicate` 兜底，缺字段按一致处理。
+SEEN_OMITTED_FIELDS = frozenset({"内容（检索的摘要）"})
 HIGH_RISK_FIELDS = {
     "项目编号", "单位", "地区", "所属省/市", "截止时间", "预算", "采购方式", "科室", "医院全名",
 }
@@ -200,8 +204,25 @@ def normalize_url(raw):
     return canonical_url(raw)
 
 
-def historical_identity_keys(title, url, publish_time):
-    """跨运行去重：链接/公告号直接判重，标题需同时匹配发布日期。"""
+def buyer_fingerprint(value):
+    """采购人指纹：与标题指纹同口径，"null"/空值归一成空串。"""
+    text = "" if value in (None, "", "null") else str(value)
+    return common_title_fingerprint(text)
+
+
+def historical_identity_keys(title, url, publish_time, buyer=""):
+    """跨运行去重：链接/公告号直接判重，标题需同时匹配发布日期与采购人。
+
+    `title_date` 键带上采购人，是因为「同标题+同日」单独不足以标识一条公告：
+    同一项目分包分别发公告、多家医院套用同一模板标题，都会撞成同一个键，结果是
+    把一条**没推过的**新公告当成重复静默丢掉。静默丢弃比重复推送危险得多——
+    重复推送看得见，漏推看不见（见 AGENT_HANDOFF.md）。因此这里宁可判得更严：
+    采购人写法不一致时最坏是多推一条，而不是少推一条。
+
+    采购人缺失时退化成空指纹，等价于旧口径，不会让老记录失效——但前提是记录里
+    真的存了 `单位`。身份键是比较时现算的，不是写入时固化的，所以只要把 `单位`
+    回填进历史记录，加维度对新旧记录同时生效。
+    """
     keys = set()
     normalized = normalize_url(url)
     # 空链接会被 normalize_url 归一成 "/"，那是所有无链接记录共用的伪身份键：
@@ -217,7 +238,7 @@ def historical_identity_keys(title, url, publish_time):
     fingerprint = common_title_fingerprint(title)
     date_match = re.search(r"20\d{2}-[01]\d-[0-3]\d", str(publish_time or ""))
     if len(fingerprint) >= 8 and date_match:
-        keys.add(("title_date", fingerprint, date_match.group(0)))
+        keys.add(("title_date", fingerprint, date_match.group(0), buyer_fingerprint(buyer)))
     return keys
 
 
@@ -474,7 +495,8 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
     known_keys = set()
     for record in seen_records:
         known_keys.update(historical_identity_keys(
-            record.get("标题"), seen_url(record), record.get("发布时间")
+            record.get("标题"), seen_url(record), record.get("发布时间"),
+            record.get("单位"),
         ))
 
     queue = []
@@ -484,8 +506,11 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
     hospital_index = get_default_index()
     clustered = cluster_candidates(candidates)
     for item in clustered:
+        # 采购人取候选索引里的 source_fields，它在 write_candidates 阶段就已落盘，
+        # 这里还没到 load_candidate_content。
         item_keys = historical_identity_keys(
-            item.get("title"), item.get("url"), item.get("publish_time")
+            item.get("title"), item.get("url"), item.get("publish_time"),
+            (item.get("source_fields") or {}).get("单位"),
         )
         if item_keys & known_keys:
             already_seen.append({**item, "skip_reason": "与已成功推送记录身份重复"})
@@ -1180,11 +1205,13 @@ def record_push(run_dir, receipt_path):
     if candidate is None:
         raise PipelineError(f"queue.jsonl中找不到candidate_id：{candidate_id}")
     normalized_link = normalize_url(payload["链接"])
-    payload_keys = historical_identity_keys(payload.get("标题"), payload.get("链接"), payload.get("发布时间"))
+    payload_keys = historical_identity_keys(
+        payload.get("标题"), payload.get("链接"), payload.get("发布时间"), payload.get("单位")
+    )
     duplicate = next((
         record for record in records
         if payload_keys & historical_identity_keys(
-            record.get("标题"), seen_url(record), record.get("发布时间")
+            record.get("标题"), seen_url(record), record.get("发布时间"), record.get("单位")
         )
     ), None)
     if duplicate:
@@ -1199,7 +1226,9 @@ def record_push(run_dir, receipt_path):
     else:
         today = datetime.now().astimezone().date().isoformat()
         records.append({
-            **payload,
+            # 摘要不入台账：它占 seen 体积的近四成，而去重只用
+            # 标题/链接/发布时间/单位 四个字段，摘要一个字节都用不上。
+            **{k: v for k, v in payload.items() if k not in SEEN_OMITTED_FIELDS},
             "_candidate_id": candidate_id,
             "_first_seen": today,
             "_last_seen": today,
