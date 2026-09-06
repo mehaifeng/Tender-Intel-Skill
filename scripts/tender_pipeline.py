@@ -22,6 +22,7 @@ from tender_ledger import (LedgerError, ledger_lock, remember_confirmed, read_le
                            confirmed_index, approved_index, resolve_review)
 from search_common import (
     BROAD_SIGNAL_GROUPS,
+    aggregate_notice,
     canonical_url,
     notice_family,
     screen_domain,
@@ -620,6 +621,19 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
     validate_candidate_index(candidates, search_dir)
     search_summary_path = search_dir / "search_summary.json"
     search_summary = load_json(search_summary_path) if search_summary_path.exists() else None
+    if search_summary:
+        # 检索失败时目录里可能还留着同日早先那次的候选。在这上面排队、核实、推送，
+        # 等于把旧情报当今天的再发一遍，而故障本身被当成「今天没情报」放过。
+        if search_summary.get("source_auth_failed"):
+            raise PipelineError(
+                "检索来源凭证失败（API Key 缺失、被拒或积分不足），本次结果不可信；"
+                "修复凭证后重新检索，不要在这次检索目录上排队"
+            )
+        if search_summary.get("exit_code"):
+            raise PipelineError(
+                f"检索来源以退出码 {search_summary['exit_code']} 结束，本次结果不完整；"
+                f"原因：{search_summary.get('failure_reason') or '见检索输出'}"
+            )
     seen_data = load_json(seen_path)
     seen_records = seen_data.get("records")
     if not isinstance(seen_records, list):
@@ -727,6 +741,8 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             "matched_keywords": matched_query_keywords(
                 item, retrieved_text, content.get("product_list", "")
             ),
+            # 多家单位合成的汇总页：接口的结构化字段各来自不同子公告，一律不绑定。
+            "aggregate_notice": aggregate_notice(item.get("title", ""), retrieved_text),
             "departments": extract_departments(retrieved_text),
         }
         # 带上来源自带的地理，和核实阶段的调用口径一致。不带提示时，标题里截出的
@@ -767,6 +783,9 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
                 "截止时间、预算、采购方式由管线从知了标讯的结构化字段直接绑定，不必提取；"
                 "create通常只需判定产品域，另可补充正文明确披露的科室。"
                 "接口值明显有误时可覆盖，但必须给出该字段的正文证据。"
+                "search_evidence.aggregate_notice 非空表示这是多家单位的汇总页，"
+                "上述字段一律不绑定：先回答「目标标的属于哪一个采购人」，答得出才"
+                "带证据逐个填，答不出就返回manual，不要让它顶着某一家医院发出去。"
             ),
             "webhook_fields": WEBHOOK_FIELDS,
             "candidates": queue[offset:offset + batch_size],
@@ -1003,9 +1022,16 @@ def canonicalize_create(row, candidate):
             row, "接口地理", api_province, "不采用",
             f"采购人名含「{buyer_province}」与接口省份「{api_province}」矛盾，地理改由医院索引补",
         )
+    # 汇总页上，省份冲突修正救不了：采购人、品类、采购方式本来就来自不同子公告，
+    # 修好地理只会让一条张冠李戴的记录看起来更可信。整组结构化字段一律不绑定，
+    # 要填就得模型自己把目标标的和某个采购人对应起来并给出证据。
+    aggregate = candidate.get("search_evidence", {}).get("aggregate_notice") or ""
+    if aggregate:
+        add_adjustment(row, "接口结构化字段", "全部", "不采用",
+                       f"多家单位的汇总页（{aggregate}），字段无法归属")
 
     for field in SOURCE_BOUND_FIELDS:
-        if geo_conflict and field in ("地区", "所属省/市"):
+        if aggregate or (geo_conflict and field in ("地区", "所属省/市")):
             continue
         value = to_webhook_text(source_fields.get(field))
         if value == "null":
@@ -1029,7 +1055,9 @@ def canonicalize_create(row, candidate):
     explicit_hospital = record["医院全名"] if record["医院全名"] != "null" else record["单位"]
     match = get_default_index().match(
         name=explicit_hospital if explicit_hospital != "null" else "",
-        text="\n".join((candidate.get("title", ""), candidate.get("site_name", ""), bound["内容（检索的摘要）"])),
+        # 汇总页的摘要里有上百家医院，拿它做文本匹配等于随机挑一家充当采购人。
+        text="" if aggregate else "\n".join(
+            (candidate.get("title", ""), candidate.get("site_name", ""), bound["内容（检索的摘要）"])),
         province=province_hint,
         city=city_hint,
         district="" if record["地区"] == "null" else record["地区"],

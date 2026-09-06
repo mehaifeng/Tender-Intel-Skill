@@ -46,6 +46,10 @@ Base URL `https://mcp-server.zhiliaobiaoxun.com/api_v2`，全部 POST JSON。
 6. **0 命中不计费**属实。85 条清单在 72h 窗口里约 21 条常年 0 命中，这部分免费。
 7. **`pub_time` 可能比公告实际发布日早一天。** 中科大附一那条血管炎标，台账记 09-02，
    知了记 09-01。**检索窗口必须比目标窗口多放一天**，否则边界上的公告会漏。
+   已由 `zlbx_search.request_window()` 落实：`--time-range 09-03..09-05` 实际请求
+   `09-02..09-05`，两个窗口都写进 `search_summary.json`（`time_range` 与
+   `request_time_range`）。多出来那天**不做回筛**——正因为 `pub_time` 不可靠，落在
+   这天的公告可能恰恰属于目标窗口；重复的部分由长期台账在列表阶段挡掉，不额外取详情。
 8. **`caller` 匹配模式不可靠**：`河北省儿童医院` 用 caller 模式搜不到自己那条过敏原
    公告，fulltext 能。凡是要确认「库里到底有没有」，只用 fulltext。
 9. **`get_account_balance` 返回 404**，接口未上线，无法程序化查余额。

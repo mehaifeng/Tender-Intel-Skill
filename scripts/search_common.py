@@ -384,6 +384,31 @@ def body_completeness(body):
     return "public_full", ""
 
 
+# 聚合来源会把「一篇覆盖多家医院」的公众号推文也收进来。此时接口的 `caller_name`
+# 只是其中一家，`province`/`city` 描述的是发文方，标的清单是所有医院的并集——
+# 采购人、品类、采购方式各来自不同子公告，任何一个字段照常绑定都可能张冠李戴。
+# 实测样本：「【扫院行动】9月4日医院采购清单」被绑成了单位=宁海县城关医院。
+_AGGREGATE_TITLE_RE = re.compile(
+    r"扫院行动|采购清单|采购(?:信息)?汇总|招标(?:信息)?汇总|信息汇总|汇总公告"
+    r"|每日(?:采购|招标|标讯)"
+    r"|[一二三四五六七八九十\d]{1,2}月[一二三四五六七八九十\d]{1,3}日[^\n]{0,8}"
+    r"(?:清单|汇总|速览|一览|盘点)"
+)
+_MEDICAL_ORG_RE = re.compile(r"[一-鿿]{2,12}?(?:医院|卫生院|保健院|卫生服务中心|医学中心)")
+# 2026-09-04 实测 24 条队列：真汇总页数出 458 家，其余最多 4 家——而那 4 家是正则
+# 连着前文吃进来的变体（`受许昌市中心医院`、`影响医院`），不是真的多家单位。门槛落在
+# 这道口子中间，宁可漏判也不误伤医共体联合采购这类确实牵涉几家医院的单一公告。
+_AGGREGATE_MIN_ORGS = 8
+
+
+def aggregate_notice(title, text):
+    """多家单位合成的汇总页；返回判定理由，不是汇总页时返回空串。"""
+    names = {match.group(0) for match in _MEDICAL_ORG_RE.finditer(text or "")}
+    if len(names) >= _AGGREGATE_MIN_ORGS:
+        return f"正文出现{len(names)}家医疗机构，字段无法归属到其中某一家"
+    return "标题是多家单位的采购汇总" if _AGGREGATE_TITLE_RE.search(title or "") else ""
+
+
 def target_category_signals(text):
     return [name for name, pattern in TARGET_CATEGORY_PATTERNS if pattern.search(text or "")]
 

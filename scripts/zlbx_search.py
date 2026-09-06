@@ -249,21 +249,76 @@ _DEADLINE_HEADING_RE = re.compile(_DEADLINE_LABEL + r"[^\n\d]{0,24}?\s*(" + _DEA
 _DEADLINE_DT_RE = re.compile(_DEADLINE_DT)
 
 
+# 更正公告标注「哪一个时间生效」有两种写法：标签左边直接点明
+#     原投标截止时间：… 现投标截止时间：…
+# 或者整块分成两段，段头才有标记，段内的标签一模一样：
+#     原内容：“…（二）投标截止时间：2026年9月14日9时00分。…”
+#     更正为：“…（二）投标截止时间：2026年9月20日9时00分。…”
+# 两种都靠「离它最近的那个标记」归属，所以往前找一段而不是只看紧邻的几个字。
+_DEADLINE_OLD_MARK_RE = re.compile(
+    r"原(?:定|来|公告|文件|内容|投标|响应|提交|递交|截止)|变更前|更正前|调整前")
+_DEADLINE_NEW_MARK_RE = re.compile(
+    r"现(?:投标|响应|提交|递交|内容|更正|变更|调整|为)|新内容"
+    r"|变更为|更正为|调整为|修改为|变更后|更正后|调整后|延期后")
+_DEADLINE_MARK_WINDOW = 400
+# 也有不重复标签、直接在一句里改的：「投标截止时间由 X 变更为 Y」。
+_DEADLINE_SHIFT_RE = re.compile(r"变更为|更正为|调整为|延期(?:至|到)|推迟(?:至|到)|改为|顺延至")
+
+
+def _deadline_marker(full_text, at):
+    """判断这个截止时间属于「原」（已作废）还是「现」（生效）；判不出返回空串。"""
+    low = max(0, at - _DEADLINE_MARK_WINDOW)
+    # 窗口越过标签起点多带几个字：`原投标截止时间` 这种标记与标签本身是连着写的，
+    # 正好在标签处切断就整个匹配不上。只认起点落在标签之前的标记。
+    window = full_text[low:at + 6]
+    limit = at - low
+
+    def nearest(pattern):
+        return max((m.end() for m in pattern.finditer(window) if m.start() < limit), default=-1)
+
+    old, new = nearest(_DEADLINE_OLD_MARK_RE), nearest(_DEADLINE_NEW_MARK_RE)
+    return "" if old == new else ("new" if new > old else "old")
+
+
 def _extract_deadline(full_text):
-    """返回 (值, 证据)；取不到或有歧义时返回 ("", "")。"""
-    match = _DEADLINE_COLON_RE.search(full_text)
-    if not match:
-        match = _DEADLINE_HEADING_RE.search(full_text)
-        if not match:
+    """返回 (值, 证据)；取不到或判不出哪个生效时返回 ("", "")。
+
+    更正公告会把原时间与现时间并排写，第一个往往是已经作废的那个。填错的截止时间比
+    留空危险，所以规则是：有明确的「现／变更为」就用它；只有「原」就留空；都没标记时
+    必须唯一，值不一致、或紧跟着另一个没有自己标签的时间，一律留空。
+    """
+    full_text = full_text or ""
+    found = []
+    for pattern in (_DEADLINE_COLON_RE, _DEADLINE_HEADING_RE):
+        for match in pattern.finditer(full_text):
+            raw = match.group(1).strip()
+            tail = full_text[match.end():match.end() + 80]
+            following = _DEADLINE_DT_RE.search(tail)
+            gap = tail[:following.start()] if following else ""
+            # 先看改期措辞，再看标点：「现更正为：」里带冒号，但它不是另起一个字段。
+            if following and len(gap) <= 24 and _DEADLINE_SHIFT_RE.search(gap):
+                shifted = following.group(0).strip()
+                found.append((_iso_datetime(shifted) or shifted, "new",
+                              match.group(0) + gap + shifted, False))
+                continue
+            # 中间隔着冒号或换行，说明后面那个时间有自己的标签（开标时间之类），
+            # 不是并排写的原/现。
+            side_by_side = bool(following) and not re.search(r"[\n：:]", gap)
+            found.append((_iso_datetime(raw) or raw,
+                          _deadline_marker(full_text, match.start()),
+                          match.group(0), side_by_side))
+    # 只剩「原」时间说明现行截止时间没写在正文里，留空而不是填个作废的。
+    for wanted in ("new", ""):
+        picked = [row for row in found if row[1] == wanted]
+        if not picked or len({row[0] for row in picked}) > 1:
+            if picked:
+                return "", ""
+            continue
+        if wanted == "" and any(row[3] for row in picked):
             return "", ""
-        # 更正公告把原/现两个时间并排写：
-        #     投标文件递交截止时间 2026年09月01日11时00分 2026年09月11日11时00分
-        # 抓到的第一个正是作废的旧时间。填错的截止时间比留空危险，宁可不填。
-        if _DEADLINE_DT_RE.search(full_text[match.end():match.end() + 80]):
-            return "", ""
-    raw = match.group(1).strip()
-    # 飞书侧按文本消费、不依赖格式，所以 ISO 解不出来时保留原文，好过整条丢掉。
-    return (_iso_datetime(raw) or raw), match.group(0)
+        # 飞书侧按文本消费、不依赖格式，所以 ISO 解不出来时保留原文，好过整条丢掉。
+        return picked[0][0], picked[0][2]
+    return "", ""
 
 
 def _deadline(item):
@@ -534,11 +589,23 @@ def window_days(start, end):
     return max(1, (end.date() - start.date()).days + 1)
 
 
+# `pub_time` 可能比公告实际发布日早一天（zlbx.md 第 7 条：中科大附一那条血管炎标，
+# 台账记 09-02、知了记 09-01）。检索窗口因此必须比目标窗口往前多放一天，否则目标
+# 窗口第一天的公告会整批漏掉。多出来的那天不做回筛——正因为 pub_time 不可靠，
+# 落在这一天的公告可能恰恰是目标窗口里的；重复的部分由长期台账挡掉，不会重复推送。
+WINDOW_LOOKBACK_DAYS = 1
+
+
+def request_window(start, end):
+    return start - timedelta(days=WINDOW_LOOKBACK_DAYS), end
+
+
 def collect(client, queries, start, end, batch_size, page_size, max_details, seen_path=None):
     known = IdentityIndex()
     if seen_path is not None:
         known = IdentityIndex(r for r in read_ledger(seen_path)["records"] if r.get("_pushed") is True)
     stats = {"empty_batches": 0, "split_batches": 0, "paged_queries": 0}
+    start, end = request_window(start, end)
     days = window_days(start, end)
     listings = collect_listings(
         client, queries, start, end, batch_size, page_size, stats,
@@ -603,6 +670,7 @@ def collect(client, queries, start, end, batch_size, page_size, max_details, see
         candidates.append(candidate)
 
     stats.update({
+        "request_time_range": f"{start.isoformat(timespec='seconds')}..{end.isoformat(timespec='seconds')}",
         "detail_calls": detail_calls,
         "dropped_no_url": dropped_no_url,
         "prefilter_dropped": prefilter_dropped[:200],
@@ -656,6 +724,7 @@ def main():
                 "match_modes": MATCH_MODES,
                 "start": start.isoformat(timespec="seconds"),
                 "end": end.isoformat(timespec="seconds"),
+                "request_start": request_window(start, end)[0].isoformat(timespec="seconds"),
                 "api_key_present": bool(
                     os.environ.get("ZLBX_API_KEY") or CONFIG_FILE.exists()
                 ),
@@ -681,6 +750,8 @@ def main():
             "source": "zlbx",
             "run_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             "time_range": f"{start.isoformat(timespec='seconds')}..{end.isoformat(timespec='seconds')}",
+            # 实际请求窗口比目标窗口往前多一天，见 WINDOW_LOOKBACK_DAYS。
+            "request_time_range": stats.get("request_time_range", ""),
             "api_key": mask_key(api_key),
             "query_count": len(queries),
             "request_count": client.request_count,

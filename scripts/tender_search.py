@@ -86,6 +86,31 @@ def main():
 
     if args.dry_run:
         return 0 if completed.returncode == 0 else 2
+
+    if completed.returncode != 0:
+        # 三件事都必须做到，少一件这类故障就会被当成「今天没情报」放过：
+        # 1. 始终写摘要——没有摘要，下游分不清「跑了没结果」和「根本没跑成」；
+        # 2. 绝不复用同一天早先那次成功留下的候选目录，否则会把昨天的情报当今天的报一遍；
+        # 3. 凭证故障原样上抛退出码 3，不折成 2。
+        failure = {
+            "schema_version": 3,
+            "run_date": date.today().isoformat(),
+            "time_range": args.time_range,
+            "source": "zlbx",
+            "exit_code": completed.returncode,
+            "source_auth_failed": completed.returncode == AUTH_ERROR_EXIT_CODE,
+            "candidate_count": 0,
+            "failure_reason": (completed.stderr.strip() or "检索来源失败")[-2000:],
+            "source_summary": source_summary,
+        }
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "search_summary.json").write_text(
+            json.dumps(failure, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        print(f"错误：检索来源失败（退出码 {completed.returncode}），未产出候选；"
+              f"故障摘要：{out_dir / 'search_summary.json'}", file=sys.stderr)
+        return AUTH_ERROR_EXIT_CODE if completed.returncode == AUTH_ERROR_EXIT_CODE else 2
+
     if not (source_dir / "candidate_index.jsonl").exists():
         print("错误：检索来源失败，未生成候选目录", file=sys.stderr)
         return 2
@@ -117,7 +142,7 @@ def main():
         f"{summary['intra_source_duplicates']} 条，最终 {len(index)} 条"
     )
     print(f"统一目录：{out_dir}")
-    return 0 if completed.returncode == 0 else 2
+    return 0
 
 
 if __name__ == "__main__":

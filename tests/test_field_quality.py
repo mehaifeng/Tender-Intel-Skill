@@ -52,15 +52,51 @@ class DeadlineExtractionTests(unittest.TestCase):
         text = "提交投标文件截止时间、开标时间和地点 2026-09-18 08:30:00（北京时间）"
         self.assertEqual(_extract_deadline(text)[0], "2026-09-18T08:30")
 
-    def test_correction_notice_with_two_datetimes_yields_nothing(self):
-        """更正公告并排写原/现两个时间，抓第一个就是作废的旧时间。填错比留空危险。"""
+    def test_correction_notice_without_a_clue_yields_nothing(self):
+        """并排写原/现两个时间又没有措辞可依，抓第一个就是作废的旧时间。填错比留空危险。"""
         for text in (
             "3开标时间、投标文件递交截止时间2026年09月01日11时00分（北京时间）"
             "2026年09月11日11时00分（北京时间）",
-            "投标文件递交截止时间：“2026年08月26日9:00” 现更正为：“2026年08月27日9:00”",
+            "原投标截止时间：2026年09月01日 11时00分。现投标截止时间见后续公告",
         ):
             with self.subTest(text=text[:24]):
                 self.assertEqual(_extract_deadline(text)[0], "")
+
+    def test_correction_notice_takes_the_new_deadline(self):
+        """写明了哪个生效就用哪个：填作废的旧时间等于把标错过去。"""
+        for text, expected in (
+            ("投标文件递交截止时间：“2026年08月26日9:00” 现更正为：“2026年08月27日9:00”",
+             "2026-08-27T09:00"),
+            ("原投标截止时间：2026年09月01日 11时00分，现投标截止时间：2026年09月11日 11时00分",
+             "2026-09-11T11:00"),
+            ("投标截止时间由2026年09月01日11时00分变更为2026年09月11日11时00分",
+             "2026-09-11T11:00"),
+            ("投标截止时间：2026年09月01日11时00分，延期至2026年09月15日09时30分",
+             "2026-09-15T09:30"),
+        ):
+            with self.subTest(text=text[:24]):
+                self.assertEqual(_extract_deadline(text)[0], expected)
+
+    def test_block_style_correction_attributes_by_section_header(self):
+        """整块改写时段内标签一模一样，只有段头「原内容／更正为」能区分。
+
+        真实样本：12项细胞因子检测试剂盒（2025-JQ06-H1009）更正公告。
+        """
+        text = (
+            "三、更正内容：\n\n原内容：\n“六、投标开始和截止时间及地点、方式\n"
+            "（一）投标开始时间： 2026 年 9 月 14 日 8 时 30 分。\n"
+            "（二）投标截止时间： 2026 年 9 月 14 日 9 时 00 分。\n"
+            "（三）投标地点： 北京市海淀区 。”\n\n更正为：\n“六、投标开始和截止时间及地点、方式\n"
+            "（一）投标开始时间： 2026 年 9 月 20 日 8 时 30 分。\n"
+            "（二）投标截止时间： 2026 年 9 月 20 日 9 时 00 分。\n"
+            "（三）投标地点： 北京市海淀区 。”"
+        )
+        self.assertEqual(_extract_deadline(text)[0], "2026-09-20T09:00")
+
+    def test_open_bid_time_after_the_deadline_is_not_a_correction(self):
+        """截止时间后面紧跟自带标签的开标时间，不能因此判成歧义而留空。"""
+        text = "投标截止时间：2026年09月16日 09时00分\n开标时间：2026年09月16日 09时00分"
+        self.assertEqual(_extract_deadline(text)[0], "2026-09-16T09:00")
 
     def test_dead_tender_without_datetime_yields_nothing(self):
         self.assertEqual(
@@ -249,14 +285,15 @@ if __name__ == "__main__":
 class SourceFieldBindingTests(unittest.TestCase):
     """接口结构化字段直接绑定后，地理一致性没有模型把关，必须由管线自己守住。"""
 
-    def _run(self, source_fields, title="某医院试剂采购公告"):
+    def _run(self, source_fields, title="某医院试剂采购公告", aggregate=""):
         from tender_pipeline import canonicalize_create
         candidate = {
             "candidate_id": "C1", "title": title, "site_name": "知了标讯",
             "url": "https://example.gov.cn/a", "publish_time": "2026-09-04",
             "date_authoritative": True, "retrieval_verified": True,
             "source_fields": source_fields,
-            "search_evidence": {"summary": "摘要", "matched_keywords": [], "departments": []},
+            "search_evidence": {"summary": "摘要", "matched_keywords": [], "departments": [],
+                                "aggregate_notice": aggregate},
         }
         row = {"candidate_id": "C1", "decision": "create", "record": {},
                "evidence": {"source_verified": True,
@@ -288,6 +325,24 @@ class SourceFieldBindingTests(unittest.TestCase):
         self.assertEqual(record["采购方式"], "邀请招标")
         self.assertTrue(any(a["field"] == "接口地理" for a in row["pipeline_adjustments"]))
 
+    def test_aggregate_page_binds_nothing_from_the_interface(self):
+        """真实样本：「【扫院行动】9月4日医院采购清单」曾被绑成单位=宁海县城关医院。
+
+        省份冲突修正救不了这种——采购人、品类、采购方式本来就来自不同子公告，
+        修好地理只会让一条张冠李戴的记录看起来更可信。
+        """
+        record, row = self._run(
+            {"单位": "浙江省宁波市宁海县城关医院", "所属省/市": "浙江", "地区": "宁海县",
+             "采购方式": "邀请招标", "项目编号": "X-1", "预算": "100"},
+            title="【扫院行动】9月4日医院采购清单",
+            aggregate="正文出现458家医疗机构，字段无法归属到其中某一家",
+        )
+        for field in ("单位", "地区", "所属省/市", "所属大区", "采购方式", "项目编号",
+                      "预算", "医院全名", "医院等级"):
+            self.assertEqual(record[field], "null", field)
+        self.assertTrue(any(a["field"] == "接口结构化字段" for a in row["pipeline_adjustments"]))
+
+
     def test_model_override_needs_field_evidence(self):
         from tender_pipeline import canonicalize_create
         candidate = {
@@ -311,3 +366,32 @@ class SourceFieldBindingTests(unittest.TestCase):
                                          "field_evidence": {}}}
         record, _ = canonicalize_create(without_evidence, candidate)
         self.assertEqual(record["预算"], "100")
+
+
+class AggregateNoticeTests(unittest.TestCase):
+    """汇总页判定门槛按 2026-09-04 实测的 24 条队列定：真汇总 458 家，其余最多 4 家。"""
+
+    def test_digest_is_detected_by_the_number_of_buyers(self):
+        from search_common import aggregate_notice
+        text = "、".join(
+            f"{city}市人民医院采购试剂"
+            for city in ("上海", "北京", "广州", "深圳", "杭州", "南京", "武汉", "成都", "西安")
+        )
+        self.assertTrue(aggregate_notice("某公众号推文", text))
+
+    def test_digest_is_detected_by_title_alone(self):
+        from search_common import aggregate_notice
+        for title in ("【扫院行动】9月4日医院采购清单", "9月4日医院采购清单", "某市每日招标汇总"):
+            with self.subTest(title=title):
+                self.assertTrue(aggregate_notice(title, ""))
+
+    def test_ordinary_notices_are_not_flagged(self):
+        from search_common import aggregate_notice
+        for title, text in (
+            ("襄阳市中心医院第六批次设备及配套医用耗材联合遴选公告", "影响医院、襄阳市中心医院"),
+            ("梅州市人民医院2026年医疗设备采购项目洽谈邀请公告（九）", "至梅州市人民医院送达"),
+            ("新疆维吾尔自治区人民医院白鸟湖医院检验科试剂采购",
+             "新疆维吾尔自治区人民医院、白鸟湖医院、西安交通大学第二附属医院、新疆医院"),
+        ):
+            with self.subTest(title=title[:16]):
+                self.assertEqual(aggregate_notice(title, text), "")

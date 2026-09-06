@@ -4,7 +4,9 @@
 """
 import sys
 import unittest
+from datetime import date, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,8 +29,10 @@ from zlbx_search import (  # noqa: E402
     parse_queries,
     parse_time_range,
     product_list_of,
+    request_window,
     source_fields_from,
 )
+import zlbx_search  # noqa: E402
 from search_common import body_completeness  # noqa: E402
 
 
@@ -220,6 +224,28 @@ class CandidateContractTests(unittest.TestCase):
         self.assertEqual(candidate["content_access"], "public_partial")
         self.assertFalse(candidate["retrieval_verified"])
         self.assertTrue(candidate["content_access_reason"])
+
+
+class SearchWindowTests(unittest.TestCase):
+    """pub_time 可能比实际发布日早一天，检索窗口必须比目标窗口往前多放一天。"""
+
+    def test_request_window_starts_one_day_earlier(self):
+        start, end = datetime(2026, 9, 3), datetime(2026, 9, 5, 23, 59, 59)
+        self.assertEqual(request_window(start, end)[0], datetime(2026, 9, 2))
+        self.assertEqual(request_window(start, end)[1], end)
+
+    def test_collect_actually_requests_the_widened_window(self):
+        seen = []
+
+        def capture(client, queries, start, end, *args, **kwargs):
+            seen.append((start.date(), end.date()))
+            return {}
+
+        with patch.object(zlbx_search, "collect_listings", side_effect=capture):
+            _, stats = zlbx_search.collect(
+                None, ["过敏"], datetime(2026, 9, 3), datetime(2026, 9, 5), 8, 50, 60)
+        self.assertEqual(seen, [(date(2026, 9, 2), date(2026, 9, 5))])
+        self.assertTrue(stats["request_time_range"].startswith("2026-09-02"))
 
 
 class BodyCompletenessTests(unittest.TestCase):

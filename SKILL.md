@@ -36,7 +36,9 @@ python scripts/tender_pipeline.py authorize-unattended --run-dir <检索目录>
 python scripts/tender_search.py
 ```
 
-默认最近72小时。适配器按 keywords.md 的85条清单自适应分批检索、对通过预筛的候选取详情正文，并把链接回源到原始站点。**退出码 3 表示 API Key 缺失、被拒或积分不足**——那是凭证故障，不是“今天没有情报”，必须报警而不是按空结果继续；`search_summary.json`的`source_auth_failed`为真时同理。接口约束与实测行为见[知了标讯适配器](references/zlbx.md)。
+默认最近72小时；因为接口的`pub_time`可能比实际发布日早一天，实际请求窗口会自动往前多放一天（两个窗口都记在`search_summary.json`）。适配器按 keywords.md 的85条清单自适应分批检索、对通过预筛的候选取详情正文，并把链接回源到原始站点。
+
+**退出码 3 表示 API Key 缺失、被拒或积分不足**——那是凭证故障，不是“今天没有情报”，必须报警而不是按空结果继续。检索层任何非零退出都会写下故障摘要（`source_auth_failed`、`failure_reason`）并且**不会复用同一天早先那次的候选目录**；`prepare`遇到这样的摘要会直接拒绝排队。接口约束与实测行为见[知了标讯适配器](references/zlbx.md)。
 
 ```bash
 python scripts/tender_pipeline.py prepare --search-dir <检索目录> --batch-size 10
@@ -45,6 +47,7 @@ python scripts/tender_pipeline.py prepare --search-dir <检索目录> --batch-si
 离线任务必须显式传`--mode report-only`、`search-only`或`verify-only`。`prepare`会自动：
 
 - 使用统一公告身份规则排除已入账记录：原始及备用链接、标讯 ID、采购人、标题、发布日期、项目号、阶段与轮次/包号。不同医院、不同阶段或不同轮次不得仅凭同标题或同项目号合并；不再用意向汇总页标题前缀吞并明细。规则及台账维护见[去重与发送登记](references/dedup.md)；
+- 识别多家单位合成的汇总页（公众号「扫院行动」这类），标进`search_evidence.aggregate_notice`并**不绑定任何接口结构化字段**：采购人、地区、采购方式各来自不同子公告，照常绑定会张冠李戴。核实阶段必须先答出目标标的属于哪个采购人，答不出就`manual`；
 - 把判不了是不是重复的候选扣在`pipeline/dedup_review.jsonl`（计入`counts.dedup_review`），既不进队列也不能发送。核对飞书后用`resolve-review --outcome duplicate|new --note <核对依据>`登记结论，登记为`new`的需重跑`prepare --force`才进批次，见[去重与发送登记](references/dedup.md)；
 - 排除无招采意图和明显噪声标题；
 - **排除标的已有结论的公告**（中标/成交/结果、废标/流标/终止/撤销、采购合同）。检索层已按`bid_process`在服务端滤掉大部分，这里只兜底；`更正`/`变更`保留，在售标的改截止时间或参数仍然可行动；

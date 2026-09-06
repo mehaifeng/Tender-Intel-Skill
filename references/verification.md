@@ -19,7 +19,8 @@
    - `public_full`（`retrieval_verified: true`）：适配器已保存完整正文，**不必再打开链接**。
    - `public_partial`：详情取到了，但正文只是个壳——写着「完整信息请查看原文」，或把内容指向附件。具体原因在 `content_access_reason`。**不要因为正文里没写就判定没有**：知了的检索覆盖附件，这条能被召回，往往正是因为附件里有目标品类。此时以标题、标的物清单、`matched_keywords` 和结构化字段为准；证据不足就输出 `manual`，不要凭空 `exclude`。
    - `metadata_only`：详情没取到，只有标题与结构化字段可用，正文相关字段一律填`"null"`。
-4. 输出`create`、`exclude`或本地`manual`。
+4. `search_evidence.aggregate_notice` 非空时，这条是**多家单位合成的汇总页**（公众号「扫院行动」这类，一篇覆盖上百家医院）。接口的采购人、地区、采购方式、预算各来自不同子公告，管线因此**一个都不绑定**。此时先回答一个问题：**目标标的属于哪一个采购人？**——答得出，就带上把标的与该采购人对应起来的正文证据逐个填；答不出，返回 `manual`。绝不能让它顶着清单里某一家医院的名字发出去。
+5. 输出`create`、`exclude`或本地`manual`。
 
 `create` 时 `record` 通常可以是空对象或只含 `科室`；脚本会补齐固定十六字段。`evidence.source_verified` 只在 `public_full` 时填 `true`，`public_partial` 与 `metadata_only` 都填 `false`。
 
