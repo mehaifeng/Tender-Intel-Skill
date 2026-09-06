@@ -21,6 +21,7 @@ from tender_identity import IdentityIndex
 from tender_ledger import read_ledger, LedgerError
 
 from search_common import (
+    body_completeness,
     compact_text,
     screen_domain,
     write_candidates,
@@ -468,6 +469,7 @@ def build_candidate(item, detail, query_hits):
     title = _clean(item.get("title")) or _clean((detail or {}).get("title"))
     detail = detail or {}
     body = html_to_text(detail.get("source"))
+    access, access_reason = body_completeness(body)
     products = product_list_of(item) or product_list_of(detail)
     fields = source_fields_from(item)
     # 详情里的结构化字段更全（列表接口不返回 county / agency_name）
@@ -515,9 +517,10 @@ def build_candidate(item, detail, query_hits):
             {"source": "zlbx", "query_number": number, "query": word}
             for number, word in sorted(query_hits)
         ],
-        # 适配器已保存完整正文，核实阶段不必再打开链接。
-        "retrieval_verified": bool(body),
-        "content_access": "public_full" if body else "metadata_only",
+        # 只有正文足以核验时才免掉核实阶段打开链接；壳正文单列 public_partial。
+        "retrieval_verified": access == "public_full",
+        "content_access": access,
+        "content_access_reason": access_reason,
         "date_authoritative": True,
         "source_priority": 400,
         "alternate_sources": [

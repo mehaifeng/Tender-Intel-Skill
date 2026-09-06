@@ -153,6 +153,7 @@ class DeliveryContractTests(unittest.TestCase):
         cid = index[0]["candidate_id"]
         payload = {k: "null" for k in FIELDS}
         payload.update(row(url=url))
+        payload["命中关键词"] = "过敏原检测"  # 该字段不接受 null，载荷校验会拦下
         payload_path = pipeline / "payloads/push" / (cid + ".json")
         payload_path.parent.mkdir(parents=True)
         body = json.dumps(payload, ensure_ascii=False).encode()

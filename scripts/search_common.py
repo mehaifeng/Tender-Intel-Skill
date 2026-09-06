@@ -353,8 +353,58 @@ def zlbx_bid_id(url):
     return match.group(1) if match else ""
 
 
+# 「详情请求成功」不等于「正文足以核验」。知了的详情有时只回标题与几个结构化字段，
+# 正文写一句「完整信息请查看原文」；实质内容在附件里——平台自己解析了附件才把这条
+# 召回，我们照着链接打开也看不到。此时不能让核实阶段以为手上是完整正文。
+# 每类指向词自带长度上限：越弱的信号越只在短正文里才说明问题。实测 638 字的
+# 招标代理选取公告里，「登录后查看」挡的是咨询电话而不是正文，不该判成壳。
+_BODY_STUB_RULES = (
+    (re.compile(r"完整信息请查看|请查看原文|详见原文|查看全文|内容详见原文"), 800,
+     "正文只给了原文链接，实质内容不在返回的正文里"),
+    (re.compile(r"详情请?见附件|详见附件|内容见附件|见公告附件|请下载附件|附件下载"), 400,
+     "正文把内容指向附件，而附件我们取不到"),
+    (re.compile(r"登录后查看|注册后查看|会员可见|请登录查看"), 200,
+     "正文需登录才能看全"),
+)
+# 2026-09-04 实测 37 条正文：两条壳分别 73/101 字且都写着「完整信息请查看原文」；
+# 145/148 字的两条竞价公告反而是完整的（正文里就是那张商品明细表），所以不能只看长度。
+_BODY_SHELL_MAX = 120
+
+
+def body_completeness(body):
+    """返回 (content_access, 原因)。区分没取到、取到但是壳、取到完整正文三种。"""
+    body = (body or "").strip()
+    if not body:
+        return "metadata_only", "详情未取到正文"
+    for pattern, limit, reason in _BODY_STUB_RULES:
+        if len(body) < limit and pattern.search(body):
+            return "public_partial", reason
+    if len(body) < _BODY_SHELL_MAX:
+        return "public_partial", f"正文仅{len(body)}字，不足以核验"
+    return "public_full", ""
+
+
 def target_category_signals(text):
     return [name for name, pattern in TARGET_CATEGORY_PATTERNS if pattern.search(text or "")]
+
+
+def target_category_matches(text, per_group=3):
+    """返回 [(组名, 公告里命中的原文片段)]，按组内首次出现顺序去重。
+
+    与 `target_category_signals` 的差别是保留**命中的原文**而不只是组名：
+    `膜性肾病/PLA2R` 这个组名对业务方没有意义，公告里写的 `磷脂酶A2受体` 才有。
+    """
+    matches = []
+    for name, pattern in TARGET_CATEGORY_PATTERNS:
+        spans = []
+        for found in pattern.finditer(text or ""):
+            span = found.group(0).strip()
+            if span and span not in spans:
+                spans.append(span)
+            if len(spans) >= per_group:
+                break
+        matches.extend((name, span) for span in spans)
+    return matches
 
 
 def signal_tier(signals):
@@ -486,6 +536,7 @@ def write_candidates(candidates, out_dir, run_date):
             "date_authoritative": bool(item.get("date_authoritative")),
             "retrieval_verified": bool(item.get("retrieval_verified")),
             "content_access": item.get("content_access") or "unknown",
+            "content_access_reason": item.get("content_access_reason") or "",
             "source_priority": int(
                 item.get("source_priority")
                 if item.get("source_priority") is not None
@@ -605,6 +656,7 @@ def merge_source_dirs(source_dirs):
             "date_authoritative": any(c.get("date_authoritative") for c, _ in members),
             "retrieval_verified": bool(primary_candidate.get("retrieval_verified")),
             "content_access": primary_candidate.get("content_access") or "unknown",
+            "content_access_reason": primary_candidate.get("content_access_reason") or "",
             "source_priority": int(
                 primary_candidate.get("source_priority")
                 if primary_candidate.get("source_priority") is not None

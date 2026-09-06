@@ -15,10 +15,13 @@
 
 1. 看批次里的标题、标的物清单、摘要、`search_evidence` 的目标品类信号与分层、以及医院匹配建议。
 2. 标题必须有明确招采意图；标题、摘要或正文必须能确认目标试剂或仪器。
-3. 候选的 `retrieval_verified: true` 表示适配器已保存完整正文，**不必再打开链接**。`content_access: metadata_only` 表示详情没取到，此时只有标题与结构化字段可用，正文相关字段一律填`"null"`。
+3. 按 `content_access` 决定还要不要去看正文以外的东西：
+   - `public_full`（`retrieval_verified: true`）：适配器已保存完整正文，**不必再打开链接**。
+   - `public_partial`：详情取到了，但正文只是个壳——写着「完整信息请查看原文」，或把内容指向附件。具体原因在 `content_access_reason`。**不要因为正文里没写就判定没有**：知了的检索覆盖附件，这条能被召回，往往正是因为附件里有目标品类。此时以标题、标的物清单、`matched_keywords` 和结构化字段为准；证据不足就输出 `manual`，不要凭空 `exclude`。
+   - `metadata_only`：详情没取到，只有标题与结构化字段可用，正文相关字段一律填`"null"`。
 4. 输出`create`、`exclude`或本地`manual`。
 
-`create` 时 `record` 通常可以是空对象或只含 `科室`；脚本会补齐固定十六字段。`evidence.source_verified` 在 `retrieval_verified: true` 时填 `true`，`metadata_only` 填 `false`。
+`create` 时 `record` 通常可以是空对象或只含 `科室`；脚本会补齐固定十六字段。`evidence.source_verified` 只在 `public_full` 时填 `true`，`public_partial` 与 `metadata_only` 都填 `false`。
 
 ## 创建结果
 

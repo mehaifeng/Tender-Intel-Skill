@@ -29,6 +29,7 @@ from zlbx_search import (  # noqa: E402
     product_list_of,
     source_fields_from,
 )
+from search_common import body_completeness  # noqa: E402
 
 
 class FakeClient:
@@ -208,6 +209,40 @@ class CandidateContractTests(unittest.TestCase):
             {"bid_id": 1, "title": "某医院试剂采购", "url": "https://example.test/a"}, None, set())
         self.assertEqual(candidate["content_access"], "metadata_only")
         self.assertFalse(candidate["retrieval_verified"])
+
+    def test_shell_body_is_not_treated_as_full_text(self):
+        """「详情请求成功」不等于「正文足以核验」。真实样本：73 字的壳。"""
+        shell = ("标题：过敏性疾病创新药物国家工程研究中心建设项目招标公告\n"
+                 "发布时间：2026-09-03 00:00:00\n完整信息请查看原文： 原文链接")
+        candidate = build_candidate(
+            {"bid_id": 1, "title": "某医院试剂采购", "url": "https://example.test/a"},
+            {"source": shell}, set())
+        self.assertEqual(candidate["content_access"], "public_partial")
+        self.assertFalse(candidate["retrieval_verified"])
+        self.assertTrue(candidate["content_access_reason"])
+
+
+class BodyCompletenessTests(unittest.TestCase):
+    """阈值对着 2026-09-04 实测的 37 条正文定，别随手放宽。"""
+
+    def test_short_but_complete_bidding_body_stays_full(self):
+        # 145 字的竞价公告，正文里就是那张商品明细表——短不等于壳。
+        body = ("竞价类型：科研服务\n竞价编号：J20260903002975\n结束时间：2026-09-08 10:11:57\n\n"
+                "序号 商品名称 需求发布人 品牌要求 商品规格 货号要求 采购数量 采购要求 商品单位\n"
+                "1 人组织样品全局组蛋白修饰定量分析 钟微课题组 钟微 30 暂无 例")
+        self.assertEqual(body_completeness(body)[0], "public_full")
+
+    def test_login_notice_inside_a_long_body_is_not_a_stub(self):
+        # 638 字的招标代理选取公告里，「登录后查看」挡的是咨询电话而不是正文。
+        body = "选取方式 择优+竞价\n" + "项目基本情况说明。" * 60 + "\n采购人业务咨询电话 （登录后查看）"
+        self.assertEqual(body_completeness(body)[0], "public_full")
+
+    def test_attachment_pointer_in_a_short_body_is_a_stub(self):
+        self.assertEqual(body_completeness("一、项目概况\n二、采购需求：详见附件。")[0], "public_partial")
+
+    def test_empty_body_is_metadata_only(self):
+        self.assertEqual(body_completeness("")[0], "metadata_only")
+        self.assertEqual(body_completeness("   ")[0], "metadata_only")
 
 
 class CredentialTests(unittest.TestCase):

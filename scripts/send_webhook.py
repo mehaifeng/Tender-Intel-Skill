@@ -120,6 +120,11 @@ def validate_payload(payload):
     for field, value in payload.items():
         if not isinstance(value, str) or value == "":
             errors.append(f"{field}必须是非空字符串；缺失填null")
+    if payload.get("标题") == "null":
+        errors.append("标题必填，不接受null")
+    if payload.get("命中关键词") == "null":
+        # 交给业务方的这条消息必须能解释「为什么会检索到它」，说不出命中词就别发。
+        errors.append("命中关键词必填，不接受null")
     province = payload.get("所属省/市")
     if province != "null" and province not in PROVINCE_LEVEL_DIVISIONS:
         errors.append("所属省/市必须是省级行政区或直辖市简称，例如北京、河北、上海、新疆")

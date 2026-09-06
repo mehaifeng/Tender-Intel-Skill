@@ -21,11 +21,13 @@ from tender_identity import IdentityIndex, remember_aliases
 from tender_ledger import (LedgerError, ledger_lock, remember_confirmed, read_ledger,
                            confirmed_index, approved_index, resolve_review)
 from search_common import (
+    BROAD_SIGNAL_GROUPS,
     canonical_url,
     notice_family,
     screen_domain,
     non_hospital_buyer,
     signal_tier,
+    target_category_matches,
     title_fingerprint as common_title_fingerprint,
     title_is_truncated as common_title_is_truncated,
     zlbx_bid_id,
@@ -317,9 +319,64 @@ QUERY_STOPWORDS = {
 }
 
 
-def matched_query_keywords(candidate, retrieved_text):
-    """从实际检索 Query 中保留确实出现在候选内容里的关键词。"""
-    values = []
+# 具体项目名后面挂的采购语境词。`仪`、`系统`、`分析仪` 不剥——它们本身就是标的，
+# 「全自动免疫印迹仪」剥成「免疫印迹」就丢了这是台仪器的信息。
+_KEYWORD_TAIL_RES = (
+    re.compile(r"[（(][^）)]*$"),  # 被截断的半个括号，`…医疗设备(二次` 这种
+    re.compile(r"及(?:其)?(?:相关|配套)+(?:仪器|设备|试剂|耗材|产品|服务)?$"),
+    re.compile(r"(?:[（(][^）)]{0,24}[）)])?"
+               r"(?:定量|定性|半定量)?(?:检测|测定|检验|筛查|分析)?"
+               r"(?:试剂盒|试剂|耗材|项目|服务|采购|招标|公告|一批)+$"),
+)
+# 具体名左侧的机构与流程前缀。只作用于命中片段**之前**的那一段，不会吃掉命中词本身。
+_KEYWORD_HEAD_RE = re.compile(
+    r"^.*(?:医院|卫生院|保健院|卫生服务中心|医学中心|医疗中心|医疗集团|防治中心|分院|院区"
+    r"|采购|招标|询价|磋商|谈判|遴选|关于|标段"
+    r"|第?[一二三四五六七八九十百\d]+(?:包|标段|批次|批|次|期))"
+)
+_KEYWORD_SEGMENT_RE = re.compile(r"[、,，;；。！？!?：:|/\n\r\t]+")
+_KEYWORD_MAX_SEGMENT = 32
+_KEYWORD_MAX_VALUE = 24
+_KEYWORD_LIMIT = 6
+
+
+def _keyword_tidy(value):
+    """HTML 抽正文时会在中文与括号旁塞空格；不归一，同一个词会当成两个词列两遍。"""
+    value = re.sub(r"\s+", " ", str(value or "")).strip()
+    value = re.sub(r"(?<=[一-鿿（(])\s+", "", value)
+    return re.sub(r"\s+(?=[一-鿿）)])", "", value)
+
+
+def _keyword_form(span, zones):
+    """把命中片段扩成公告里的完整写法：优先标的清单条目，其次短句段。"""
+    lowered = span.lower()
+    for zone in zones:
+        forms = []
+        for segment in _KEYWORD_SEGMENT_RE.split(zone or ""):
+            segment = _keyword_tidy(segment)
+            at = segment.lower().find(lowered)
+            if at < 0 or len(segment) > _KEYWORD_MAX_SEGMENT:
+                continue
+            head = _KEYWORD_HEAD_RE.match(segment[:at])
+            start = head.end() if head else 0
+            # 尾部只削命中片段**之后**的部分：从整串上削会吃掉命中词自己，
+            # 「总免疫球蛋白IgE检测试剂盒」命中的是「IgE检测」，整串削完就找不回来了。
+            keep, tail = segment[start:at + len(span)], segment[at + len(span):]
+            for _ in range(len(_KEYWORD_TAIL_RES)):
+                for pattern in _KEYWORD_TAIL_RES:
+                    tail = pattern.sub("", tail)
+            # 括号不进 strip 集合：`…医疗设备(二次)` 削掉右括号反而留下半个括号。
+            value = (keep + tail).strip(" -—·:：、。．,，;；【】")
+            if len(value) <= _KEYWORD_MAX_VALUE:
+                forms.append(value)
+        # 同一个词往往在多处出现。要的是**最紧的那个有信息量的写法**：先挑比命中片段
+        # 更具体的，再在其中取最短——否则同一条公告里裸出现一次就把具体写法挤掉了。
+        if forms:
+            return min(forms, key=lambda value: (value.lower() == lowered, len(value)))
+    return ""
+
+
+def _query_terms(candidate):
     for hit in candidate.get("found_by_source_query") or []:
         if not isinstance(hit, dict):
             continue
@@ -328,11 +385,54 @@ def matched_query_keywords(candidate, retrieved_text):
             continue
         for term in re.split(r"[\s,，、|]+", query):
             term = term.strip()
-            if not term or term in QUERY_STOPWORDS:
-                continue
-            if re.search(re.escape(term), retrieved_text or "", re.I) and term not in values:
-                values.append(term)
-    return values
+            if term and term not in QUERY_STOPWORDS:
+                yield term
+
+
+def matched_query_keywords(candidate, retrieved_text, product_list=""):
+    """解释这条公告为什么会被检索到。**结构上不允许为空。**
+
+    两件事让「拿检索词回找」不够用：
+
+    1. 知了的 fulltext 覆盖附件，公告的标题、标的清单、正文里根本看不到检索词是
+       常态而非异常。`PLA2R` 捞回来的那条，清单里写的是「抗磷脂酶A2受体抗体IgG
+       测定试剂」，按检索词回找的结果是空，业务方看到的就是 null。
+    2. 检索词本身是按 keywords.md 放宽出来的最短片段。给业务方交一个「过敏」或
+       「风湿」，解释不了命中的到底是什么。
+
+    所以改以**品类信号在公告里命中的原文片段**为准，再扩到标的清单条目的完整写法，
+    检索词只作补充。品类信号非空是入队的前提（`search_common.screen_domain` 无信号
+    即丢弃），因此凡是能走到载荷的候选，这里都取得到值。
+
+    宽片段组（`细胞因子`、`风湿` 等）排在最后：它们是真命中，不该丢，但也不该
+    挤掉具体项目名。
+    """
+    zones = [product_list or "", retrieved_text or ""]
+    haystack = "\n".join(zones)
+    ranked = {}
+
+    def offer(value, rank):
+        if value and (rank < ranked.get(value, 9)):
+            ranked[value] = rank
+
+    for name, span in target_category_matches(haystack):
+        span = _keyword_tidy(span)
+        form = _keyword_form(span, zones) or span
+        if name in BROAD_SIGNAL_GROUPS:
+            offer(form, 2)
+        else:
+            offer(form, 0 if form.lower() != span.lower() else 1)
+    for term in _query_terms(candidate):
+        if not re.search(re.escape(term), haystack, re.I):
+            continue
+        form = _keyword_form(term, zones) or term
+        offer(form, 0 if form.lower() != term.lower() else 1)
+
+    ordered = sorted(ranked, key=lambda value: ranked[value])
+    # 被更具体的写法包含的片段不重复列出：有「过敏原检测」就不再单列「过敏」。
+    kept = [value for value in ordered
+            if not any(value != other and value.lower() in other.lower() for other in ordered)]
+    return (kept or ordered)[:_KEYWORD_LIMIT]
 
 
 def extract_departments(retrieved_text):
@@ -619,11 +719,14 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             "content_sha256": sha256_file(content_path),
             "retrieval_verified": bool(item.get("retrieval_verified")),
             "content_access": item.get("content_access") or "unknown",
+            "content_access_reason": item.get("content_access_reason") or "",
             "sources": item.get("sources") or [item.get("source") or "unknown"],
             "source_fields": item.get("source_fields") or content.get("source_fields") or {},
             "field_evidence": item.get("field_evidence") or content.get("field_evidence") or {},
             "attachments": item.get("attachments") or content.get("attachments") or [],
-            "matched_keywords": matched_query_keywords(item, retrieved_text),
+            "matched_keywords": matched_query_keywords(
+                item, retrieved_text, content.get("product_list", "")
+            ),
             "departments": extract_departments(retrieved_text),
         }
         # 带上来源自带的地理，和核实阶段的调用口径一致。不带提示时，标题里截出的
@@ -1004,6 +1107,9 @@ def validate_create(record, evidence, label):
             errors.append(f"{label}.record.{field}必须是非空字符串；缺失填null")
     if record.get("标题") == "null":
         errors.append(f"{label}.record.标题必填")
+    if record.get("命中关键词") == "null":
+        # 说不出命中的是哪个词，就没法向业务方解释这条为什么会被检索到。
+        errors.append(f"{label}.record.命中关键词必填，不接受null")
     if not re.match(r"https?://", record.get("链接", "")):
         errors.append(f"{label}.record.链接必须是http(s) URL")
     if record.get("发布时间") != "null" and not DATE_RE.fullmatch(record["发布时间"]):

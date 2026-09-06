@@ -63,7 +63,7 @@ python scripts/tender_pipeline.py status --run-dir <检索目录>
 python scripts/tender_pipeline.py next-batch --run-dir <检索目录>
 ```
 
-读取当前批次后按[核验协议](references/verification.md)处理。候选的`retrieval_verified: true`表示适配器已保存完整正文，**不必打开链接**；`content_access: metadata_only`表示详情没取到，只有标题与结构化字段可用。
+读取当前批次后按[核验协议](references/verification.md)处理。候选的`retrieval_verified: true`（`content_access: public_full`）表示适配器已保存完整正文，**不必打开链接**；`public_partial`表示正文只是个壳（写着「查看原文」或把内容指向附件，原因见`content_access_reason`），知了的检索覆盖附件，**正文里没写不等于没有**，证据不足输出`manual`而不是`exclude`；`metadata_only`表示详情没取到，只有标题与结构化字段可用。
 
 **十六字段里只有`科室`需要你可能补充。** 项目编号、单位、地区、所属省/市、截止时间、预算、采购方式由管线从知了标讯的结构化字段直接绑定（`SOURCE_BOUND_FIELDS`），标题、发布时间、命中关键词、摘要、链接同样由管线绑定，医院全名与等级来自本地索引。接口值明显有误时可以覆盖，但**必须在`field_evidence`里给出该字段的正文证据**，否则覆盖不生效。
 
