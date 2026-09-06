@@ -176,6 +176,8 @@ def main():
     parser.add_argument("--no-secrets", action="store_true", help="不带凭据")
     parser.add_argument("--no-tests", action="store_true", help="不带自检用例")
     parser.add_argument("--out", help="输出目录；默认 dist/")
+    parser.add_argument("--zip-only", action="store_true",
+                        help="只留压缩包；自检仍在包目录里跑，跑完把目录删掉")
     args = parser.parse_args()
 
     include_secrets = not args.no_secrets
@@ -200,7 +202,12 @@ def main():
             if path.is_file():
                 handle.write(path, path.relative_to(package_dir.parent))
 
-    print(f"包目录：{package_dir}")
+    # 自检必须先在真实目录里跑完，删目录只是最后一步：没跑过自检的包不该发出去。
+    if args.zip_only:
+        shutil.rmtree(package_dir, ignore_errors=True)
+        print("包目录：已删除（--zip-only）")
+    else:
+        print(f"包目录：{package_dir}")
     print(f"压缩包：{archive}（{archive.stat().st_size / 1024:.0f} KB，{len(names)} 个文件）")
     print(f"含凭据：{'是' if include_secrets else '否'}　含自检用例：{'是' if include_tests else '否'}")
     for label, ok, detail in checks:
