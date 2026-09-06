@@ -44,7 +44,8 @@ python scripts/tender_pipeline.py prepare --search-dir <检索目录> --batch-si
 
 离线任务必须显式传`--mode report-only`、`search-only`或`verify-only`。`prepare`会自动：
 
-- 按规范链接、标讯`bid_id`或“标题指纹+发布时间+采购人”排除已成功推送记录。标题指纹先剥掉聚合站加的栏目壳（`【调查公告】`、`[政采云]`）和来源截断的省略号；另有三类同一公告严格键对不上，由 `title_identity_duplicate()` 兜底：台账记录没存采购人（此时不拿采购人当判据）、来源截断标题（按前缀比）、同一公告跨平台转载差一两天（指纹全等且不超过 `REPOST_WINDOW_DAYS` 天）；
+- 使用统一公告身份规则排除已入账记录：原始及备用链接、标讯 ID、采购人、标题、发布日期、项目号、阶段与轮次/包号。不同医院、不同阶段或不同轮次不得仅凭同标题或同项目号合并；不再用意向汇总页标题前缀吞并明细。规则及台账维护见[去重与发送登记](references/dedup.md)；
+- 把判不了是不是重复的候选扣在`pipeline/dedup_review.jsonl`（计入`counts.dedup_review`），既不进队列也不能发送。核对飞书后用`resolve-review --outcome duplicate|new --note <核对依据>`登记结论，登记为`new`的需重跑`prepare --force`才进批次，见[去重与发送登记](references/dedup.md)；
 - 排除无招采意图和明显噪声标题；
 - **排除标的已有结论的公告**（中标/成交/结果、废标/流标/终止/撤销、采购合同）。检索层已按`bid_process`在服务端滤掉大部分，这里只兜底；`更正`/`变更`保留，在售标的改截止时间或参数仍然可行动；
 - **排除纯流程性公告**：开标（时间/地点）通知、开标记录、唱标、评标结果/报告、资格预审结果。可行动信息都在原招标公告里；同样让`更正`/`变更`优先；
@@ -110,7 +111,15 @@ python scripts/send_webhook.py --payload <载荷文件> --live --manifest <manif
 python scripts/tender_pipeline.py record-push --run-dir <检索目录> --receipt <成功回执>
 ```
 
-Windows旧任务可继续使用字段与门禁一致的`scripts/send_webhook.ps1`。只有HTTP 200且飞书返回`code: 0`才更新`seen.json`。零有效记录不发送。
+Windows旧任务的`scripts/send_webhook.ps1`转调同一Python发送器。发送前会在共享台账锁内再次查重，已入账则零POST跳过；请求前保存发送占位，HTTP 200且飞书返回整数`code: 0`后立即更新长期`seen.json`。`record-push`负责运行回执汇总，重复登记幂等，跳过计数单独披露。零有效记录不发送。
+
+发送结果未知时保留占位并阻止重发，先按[去重与发送登记](references/dedup.md)核对飞书；不得自动清除占位或盲目重试。成功回执已落盘时可自动恢复台账。多个生产任务必须共用同一台账。台账长期保留，不按公告日期裁剪。
+
+飞书导出表可用`scripts/import_feishu_ledger.py --xlsx <导出文件> --apply`增量导入。表内所有记录都作为已存在的防重依据，销售侧“是否已推送”空白不代表需要再次插入。
+
+## 分发
+
+本项目只在`dist/`发布最新产物，不自动安装技能。使用`python scripts/build_package.py`生成本机部署包；升级已有部署时保留其最新`seen.json`，不要用包内快照覆盖。
 
 ## 完成条件
 

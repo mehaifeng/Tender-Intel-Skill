@@ -17,6 +17,8 @@ import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from tender_identity import IdentityIndex
+from tender_ledger import read_ledger, LedgerError
 
 from search_common import (
     compact_text,
@@ -493,6 +495,7 @@ def build_candidate(item, detail, query_hits):
 
     return {
         "source": "zlbx",
+        "bid_id": item.get("bid_id") or detail.get("bid_id") or "",
         "title": title,
         "site_name": "知了标讯",
         "url": url,
@@ -528,7 +531,10 @@ def window_days(start, end):
     return max(1, (end.date() - start.date()).days + 1)
 
 
-def collect(client, queries, start, end, batch_size, page_size, max_details):
+def collect(client, queries, start, end, batch_size, page_size, max_details, seen_path=None):
+    known = IdentityIndex()
+    if seen_path is not None:
+        known = IdentityIndex(r for r in read_ledger(seen_path)["records"] if r.get("_pushed") is True)
     stats = {"empty_batches": 0, "split_batches": 0, "paged_queries": 0}
     days = window_days(start, end)
     listings = collect_listings(
@@ -552,6 +558,7 @@ def collect(client, queries, start, end, batch_size, page_size, max_details):
         hits[bid_id] = {(number, word) for number, word in numbered if word.lower() in haystack}
 
     prefilter_dropped = []
+    already_seen = []
     kept = []
     for bid_id, item in listings.items():
         title = _clean(item.get("title"))
@@ -561,6 +568,14 @@ def collect(client, queries, start, end, batch_size, page_size, max_details):
             prefilter_dropped.append({
                 "bid_id": bid_id, "title": title, "reason": screen["reason"],
             })
+            continue
+        duplicate, reason = known.find({
+            "title": title, "bid_id": bid_id, "url": item.get("url"),
+            "publish_time": item.get("pub_time"), "source_fields": source_fields_from(item),
+        })
+        if duplicate is not None:
+            already_seen.append({"bid_id": bid_id, "title": title, "reason": reason,
+                                 "matched_feishu_id": duplicate.get("_feishu_id")})
             continue
         kept.append((bid_id, item))
 
@@ -590,6 +605,8 @@ def collect(client, queries, start, end, batch_size, page_size, max_details):
         "prefilter_dropped": prefilter_dropped[:200],
         "prefilter_dropped_count": len(prefilter_dropped),
         "raw_result_count": len(listings),
+        "already_seen_before_detail_count": len(already_seen),
+        "already_seen_before_detail": already_seen,
     })
     return candidates, stats
 
@@ -609,6 +626,7 @@ def main():
     parser.add_argument("--max-details", type=int, default=60,
                         help="get_bid_detail 调用上限，每次 1 积分")
     parser.add_argument("--delay", type=float, default=0.25)
+    parser.add_argument("--seen", default=str(ROOT / "data/seen.json"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -652,6 +670,7 @@ def main():
             client, queries, start, end,
             batch_size=args.batch_size, page_size=args.page_size,
             max_details=args.max_details,
+            seen_path=args.seen,
         )
         index = write_candidates(candidates, out_dir, date.today().isoformat())
         summary = {
@@ -680,7 +699,7 @@ def main():
     except ZlbxAuthError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 3
-    except ZlbxError as exc:
+    except (ZlbxError, LedgerError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
 

@@ -639,7 +639,7 @@ class IntentSummaryClusterTests(unittest.TestCase):
             "source_fields": {"单位": buyer},
         }
 
-    def test_intent_summary_merges_into_the_detail_page(self):
+    def test_intent_summary_does_not_swallow_a_project_detail(self):
         rows = cluster_candidates([
             self._candidate(
                 "C1", "鄂尔多斯市东胜区人民医院2026年09月至2026年10月政府采购意向",
@@ -649,10 +649,8 @@ class IntentSummaryClusterTests(unittest.TestCase):
                 "鄂尔多斯市东胜区人民医院2026年09月至2026年10月政府采购意向-医疗设备采购项目 详细情况",
                 "鄂尔多斯市东胜区人民医院"),
         ])
-        self.assertEqual(len(rows), 1)
-        # 代表取标题更长的明细页：预算与具体标的都在那一条上。
-        self.assertEqual(rows[0]["candidate_id"], "C2")
-        self.assertEqual(sorted(rows[0]["cluster_members"]), ["C1", "C2"])
+        # 汇总页可能有多个明细项目，仅凭标题前缀不能证明同一公告。
+        self.assertEqual(len(rows), 2)
 
     def test_different_notice_families_are_never_merged(self):
         """SKILL 明确禁止合并同一项目的不同阶段，前缀关系也不行。"""

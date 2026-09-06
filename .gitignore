@@ -21,3 +21,6 @@ __pycache__/
 # 医院索引的中间产物：未压缩版与重建前备份，只留 hospitals.min.json.gz 入库
 data/hospitals.min.json
 data/*.bak
+
+# 跨进程锁文件；状态在 seen.json 中，锁文件不打包
+*.json.lock

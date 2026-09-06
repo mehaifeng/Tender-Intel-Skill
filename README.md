@@ -1,6 +1,6 @@
 # IVD Bid Radar Skill
 
-面向过敏原、自身免疫IVD试剂和免疫分析仪器采购情报的无人值守管线：默认检索最近72小时，完成去重、快速网页核验、医院库匹配和固定16字段Webhook推送。
+面向过敏原、自身免疫IVD试剂和免疫分析仪器采购情报的无人值守管线：默认检索最近72小时，完成去重、快速品类核验、医院库匹配和固定16字段Webhook推送。
 
 ## 处理流程
 
@@ -28,6 +28,10 @@
 | `scripts/zlbx_search.py` | 知了标讯检索、详情正文与回源链接补全 |
 | `scripts/search_common.py` | 统一候选契约、链接规范化与查重 |
 | `scripts/tender_pipeline.py` | 去重、预筛、批次、字段校验和回执登记 |
+| `scripts/tender_identity.py` | 全流程共用公告身份规则 |
+| `scripts/tender_ledger.py` | 长期台账锁与未知发送结果登记 |
+| `scripts/import_feishu_ledger.py` | 飞书 XLSX 台账增量导入 |
+| `references/dedup.md` | 去重设计、发送防重与升级约定 |
 | `scripts/hospital_match.py` | 医院名称、别名、等级的本地确定性匹配 |
 | `scripts/send_webhook.py` | 主用Webhook DryRun和生产发送门禁 |
 | `scripts/send_webhook.ps1` | Windows兼容发送入口 |
@@ -113,3 +117,13 @@ python scripts/tender_pipeline.py record-push --run-dir <检索目录> --receipt
 - Python 3.9+标准库；正常运行不需要Python第三方包
 - Windows旧任务如继续使用`scripts/send_webhook.ps1`，需要PowerShell 5.1+或PowerShell 7+
 - 医院运行索引已经内置，不需要在日常任务中读取原始15MB工作簿
+
+## 去重与部署约定
+
+飞书全量台账已作为防重基线导入，台账长期保留。列表阶段能确认已入账的结果直接跳过详情，
+发送前再检查最新台账；发送成功立即入账，重跑无需等待 record-push 才能防重。
+未知发送结果停止自动重发，核对后登记。判不了是否重复的候选扣在`pipeline/dedup_review.jsonl`，
+核对飞书后用`tender_pipeline.py resolve-review`登记为重复或新公告。详见 [去重与发送登记](references/dedup.md)。
+
+只在 dist 生成分发包，不安装新技能。升级时保留已有生产部署的最新 data/seen.json，
+不可用包内快照覆盖；用最新飞书导出表增量导入。所有生产任务共用同一台账。

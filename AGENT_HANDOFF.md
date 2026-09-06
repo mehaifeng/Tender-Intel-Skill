@@ -1,3 +1,15 @@
+# 当前约定（2026-09-06）
+
+- 用户要求移除本机旧 tender-intel，已执行；不安装新技能，只在 dist 发布。
+- 保留列表 title/sm_names 预筛，不扩大详情获取范围。
+- 去重统一使用 tender_identity.py；飞书导出 387 行已增量导入，保留本地历史后共496行。
+- seen.json 长期保留；同机生产任务共用台账，升级不能用包内快照覆盖运行台账。
+- send_webhook.py 在请求前持久化占位，成功后立即入账，未知结果不自动重发。
+- 判不了的疑似重复扣在 dedup_review.jsonl，出口只有 resolve-review；不要手工改 seen.json。
+- Windows 入口转调 Python。详细规则、导入与恢复命令见 references/dedup.md。
+
+以下为改造前历史背景；与上述当前约定冲突时以当前约定及 dedup.md 为准。
+
 # AGENT HANDOFF — 2026-09-05
 
 机器可读交接。动检索层、字段绑定或 `data/seen.json` 之前先读完。

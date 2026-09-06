@@ -33,6 +33,7 @@ FILES = [
     "references/verification.md",
     "references/keywords.md",
     "references/zlbx.md",
+    "references/dedup.md",
     "scripts/zlbx_search.py",
     "scripts/tender_search.py",
     "scripts/tender_pipeline.py",
@@ -40,6 +41,9 @@ FILES = [
     "scripts/hospital_match.py",
     "scripts/send_webhook.py",
     "scripts/send_webhook.ps1",
+    "scripts/tender_identity.py",
+    "scripts/tender_ledger.py",
+    "scripts/import_feishu_ledger.py",
     "config/zlbx.example.json",
     "config/webhook.example.json",
     # 医院索引与台账：没有它们跑不出医院全名/等级，也会重复推送历史公告。
@@ -57,6 +61,8 @@ TEST_FILES = [
     "tests/test_field_quality.py",
     "tests/test_notice_stage.py",
     "tests/test_webhook_schema.py",
+    "tests/test_dedup_contract.py",
+    "tests/test_ledger_import.py",
 ]
 SECRET_FILES = ["config/zlbx.json", "config/webhook.json"]
 
@@ -78,7 +84,7 @@ QUICKSTART = """# 快速开始
 
 ## 2. 自检
 
-    python3 -m unittest discover -s tests        # 应为 121 条全绿
+    python3 -m unittest discover -s tests        # 全部测试应通过
     python3 scripts/tender_search.py --dry-run   # 不发请求、不读凭据，校验清单与参数
 
 ## 3. 跑一次完整流程
@@ -89,6 +95,14 @@ QUICKSTART = """# 快速开始
 
 之后按 `SKILL.md` 走核实、提交批次、DryRun、推送、登记回执。
 默认窗口 72 小时；`--time-range 24h` 或 `YYYY-MM-DD..YYYY-MM-DD` 可改。
+
+`data/seen.json` 是长期共享台账，不能删除、按日期裁剪或用旧包覆盖。
+首次部署可用包内已导入的飞书台账；升级时保留运行目录的 seen.json（含发送占位），
+用 import_feishu_ledger.py --xlsx <最新飞书导出.xlsx> --apply 增量更新。
+同机多任务必须指向同一份台账。跨机器独立台账不能防止同时发送。
+发送结果未知时停止重发，按 references/dedup.md 核对，不要直接重跑绕过。
+判不了是否重复的候选扣在 pipeline/dedup_review.jsonl，核对飞书后用
+tender_pipeline.py resolve-review 登记为 duplicate 或 new，同样不要绕过。
 
 ## 4. 花多少钱
 
@@ -127,6 +141,13 @@ def build(out_dir, include_secrets, include_tests):
         if name in SECRET_FILES:
             target.chmod(0o600)
     (out_dir / "快速开始.md").write_text(QUICKSTART, encoding="utf-8")
+    if not include_secrets:
+        guide = (out_dir / "快速开始.md").read_text(encoding="utf-8")
+        guide = guide.replace("开箱即用包，凭据已内置。", "本包不含凭据，需自行配置 config/*.json。")
+        start = guide.index("**凭据已在包内**")
+        end = guide.index("## 2. 自检", start)
+        guide = guide[:start] + "按 config/*.example.json 配置本机凭据，然后运行自检。\n\n" + guide[end:]
+        (out_dir / "快速开始.md").write_text(guide, encoding="utf-8")
     return names + ["快速开始.md"]
 
 

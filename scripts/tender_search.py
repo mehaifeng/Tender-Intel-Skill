@@ -34,6 +34,8 @@ def build_command(args, source_dir):
     ]
     if args.queries:
         command.extend(["--queries", args.queries])
+    if getattr(args, "seen", None):
+        command.extend(["--seen", args.seen])
     if args.dry_run:
         command.append("--dry-run")
     return command
@@ -52,6 +54,7 @@ def main():
     parser.add_argument("--page-size", type=int, default=50)
     parser.add_argument("--max-details", type=int, default=60)
     parser.add_argument("--delay", type=float, default=0.25)
+    parser.add_argument("--seen", default=str(ROOT / "data/seen.json"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -103,6 +106,7 @@ def main():
         "source_candidate_count": source_candidate_count,
         "intra_source_duplicates": max(0, source_candidate_count - len(index)),
         "candidate_count": len(index),
+        "already_seen_before_detail_count": int((source_summary or {}).get("already_seen_before_detail_count") or 0),
         "source_summary": source_summary,
     }
     (out_dir / "search_summary.json").write_text(

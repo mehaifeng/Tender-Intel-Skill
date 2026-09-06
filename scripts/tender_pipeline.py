@@ -17,6 +17,9 @@ from datetime import date, datetime
 from pathlib import Path
 
 from hospital_match import get_default_index
+from tender_identity import IdentityIndex, remember_aliases
+from tender_ledger import (LedgerError, ledger_lock, remember_confirmed, read_ledger,
+                           confirmed_index, approved_index, resolve_review)
 from search_common import (
     canonical_url,
     notice_family,
@@ -26,6 +29,7 @@ from search_common import (
     title_fingerprint as common_title_fingerprint,
     title_is_truncated as common_title_is_truncated,
     zlbx_bid_id,
+    group_candidates,
 )
 
 
@@ -237,124 +241,29 @@ def compose_summary(summary, product_list):
     return compact_text(" ".join(parts), limit=SUMMARY_WITH_PRODUCT_LIMIT)
 
 
-def buyer_fingerprint(value):
-    """采购人指纹：与标题指纹同口径，"null"/空值归一成空串。"""
-    text = "" if value in (None, "", "null") else str(value)
-    return common_title_fingerprint(text)
-
-
 def historical_identity_keys(title, url, publish_time, buyer=""):
-    """跨运行去重：链接/公告号直接判重，标题需同时匹配发布日期与采购人。
-
-    `title_date` 键带上采购人，是因为「同标题+同日」单独不足以标识一条公告：
-    同一项目分包分别发公告、多家医院套用同一模板标题，都会撞成同一个键，结果是
-    把一条**没推过的**新公告当成重复静默丢掉。静默丢弃比重复推送危险得多——
-    重复推送看得见，漏推看不见（见 AGENT_HANDOFF.md）。因此这里宁可判得更严：
-    采购人写法不一致时最坏是多推一条，而不是少推一条。
-
-    采购人缺失时退化成空指纹，等价于旧口径，不会让老记录失效——但前提是记录里
-    真的存了 `单位`。身份键是比较时现算的，不是写入时固化的，所以只要把 `单位`
-    回填进历史记录，加维度对新旧记录同时生效。
-    """
-    keys = set()
-    normalized = normalize_url(url)
-    # 空链接会被 normalize_url 归一成 "/"，那是所有无链接记录共用的伪身份键：
-    # 一旦进了 known_keys，第一条无链接记录就会把后面所有无链接记录判成重复。
-    if normalized and normalized != "/":
-        keys.add(("url", normalized))
-    bid_id = zlbx_bid_id(normalized)
-    if bid_id:
-        keys.add(("zlbx", bid_id))
-    fingerprint = common_title_fingerprint(title)
-    date_match = re.search(r"20\d{2}-[01]\d-[0-3]\d", str(publish_time or ""))
-    if len(fingerprint) >= 8 and date_match:
-        keys.add(("title_date", fingerprint, date_match.group(0), buyer_fingerprint(buyer)))
+    """旧调用方的键接口；实际判重均使用 IdentityIndex。"""
+    from tender_identity import identity
+    value = identity({"标题": title, "链接": url, "发布时间": publish_time, "单位": buyer})
+    keys = {("url", u) for u in value.urls} | {("id", i) for i in value.ids}
+    if len(value.fp) >= 8 and value.published:
+        keys.add(("title_date", value.fp, value.published, value.buyer))
     return keys
 
 
-# 截断标题按前缀判重时，指纹至少要有这么长才算数。太短的前缀（「某某医院」）
-# 在同一家医院同一天可以匹上任何一条公告。
-TRUNCATED_TITLE_MIN_FINGERPRINT = 16
-# 同一条公告在不同平台转载的日期差容忍度。知了聚合全网，同一条公告可能既收了省级
-# 交易网的原发、又收了政府采购网的隔天转载：白鸟湖那条抗核抗体标在新疆公共资源网是
-# 09-03，在政采网是 09-04，链接对不上，只剩标题。**只对指纹完全相同的标题放这个窗口**，
-# 重发的公告几乎总会在标题里写「第二次」「二次」，指纹随之改变，不会落进来。
-REPOST_WINDOW_DAYS = 3
-
-
 def title_identity(title, publish_time, buyer):
-    """(标题指纹, 发布日期, 采购人指纹, 标题是否被来源截断)；缺日期或指纹太短返回 None。"""
-    fingerprint = common_title_fingerprint(title)
-    date_match = re.search(r"20\d{2}-[01]\d-[0-3]\d", str(publish_time or ""))
-    if len(fingerprint) < 8 or not date_match:
-        return None
-    return (
-        fingerprint,
-        date_match.group(0),
-        buyer_fingerprint(buyer),
-        common_title_is_truncated(title),
-    )
+    """兼容旧调用签名，返回统一的公告身份。"""
+    from tender_identity import identity
+    value = identity({"标题": title, "发布时间": publish_time, "单位": buyer})
+    return value if len(value.fp) >= 8 and value.published else None
 
 
-def _buyers_compatible(one, other):
-    """采购人指纹相容：两边都知道时必须相等，任一边不知道时不作判据。"""
-    return not one or not other or one == other
-
-
-def _date_gap(one, other):
-    return abs((date.fromisoformat(one) - date.fromisoformat(other)).days)
-
-
-def _within_repost_window(one, other):
-    try:
-        return _date_gap(one, other) <= REPOST_WINDOW_DAYS
-    except ValueError:
-        return False
-
-
-def title_identity_duplicate(identity, known_identities):
-    """`historical_identity_keys` 的严格键覆盖不到的三类同一公告，返回理由或空串。
-
-    严格键要求「标题指纹 + 发布日期 + 采购人指纹」三项**全等**。实测有三类同一条
-    公告过不了这个等号，而它们都不该重推（2026-09-05 用 09-02 单日窗口回测）：
-
-    1. **一边不知道采购人。** `historical_identity_keys` 的注释说「采购人缺失时
-       退化成空指纹，等价于旧口径」——但空指纹在集合里是一个**具体值**，不是通配符，
-       所以只存了标题/链接/发布时间的瘦台账记录（飞书导入的那批）实际上匹配不上任何
-       带 `单位` 的候选，等于整批失效。这里按注释本来的意思实现：一边不知道就不拿
-       采购人当判据，两边都知道才要求相等。**两个已知且不同的采购人仍然判成两条**，
-       2533a54 加这一维要防的「同一模板标题撞成同一个键」不受影响。
-    2. **一边的标题被来源截断。** 聚合来源会把长标题砍断并以省略号收尾（见
-       search_common 的 TITLE_ELLIPSIS_RE），指纹只能是完整标题指纹的前缀。
-       台账里那批历史记录就有这种截断标题。只在标题确实以省略号
-       收尾、指纹不短于 TRUNCATED_TITLE_MIN_FINGERPRINT、且发布日期与采购人相容时
-       才认前缀——三个条件叠起来，「…采购意向公告(第77批)」和「(第78批)」这类
-       同院同日的兄弟公告不会被误判：它们谁也不是谁的前缀，也都没被截断。
-    """
-    if identity is None:
+def title_identity_duplicate(value, known_identities):
+    from tender_identity import duplicate_reason
+    if value is None:
         return ""
-    fingerprint, publish_date, buyer, truncated = identity
-    for known_fp, known_date, known_buyer, known_truncated in known_identities:
-        if not _buyers_compatible(buyer, known_buyer):
-            continue
-        if known_date != publish_date:
-            # 3. **跨平台转载**：同一条公告先后挂在省级交易网和政府采购网，
-            #    链接不同，发布日期还差一两天。只认指纹完全相同的标题。
-            if known_fp == fingerprint and _within_repost_window(publish_date, known_date):
-                gap = _date_gap(publish_date, known_date)
-                return f"标题一致、发布时间相差 {gap} 天，判为跨平台转载"
-            continue
-        if known_fp == fingerprint:
-            if buyer and known_buyer:
-                continue  # 严格键已经覆盖，不重复计理由
-            return "标题与发布时间一致，且台账记录没有采购人可供区分"
-        if (truncated and len(fingerprint) >= TRUNCATED_TITLE_MIN_FINGERPRINT
-                and known_fp.startswith(fingerprint)):
-            return "来源截断的标题是台账标题的前缀，发布时间与采购人相容"
-        if (known_truncated and len(known_fp) >= TRUNCATED_TITLE_MIN_FINGERPRINT
-                and fingerprint.startswith(known_fp)):
-            return "台账里存的是被截断的标题，当前候选是它的完整写法"
-    return ""
+    return next((reason for known in known_identities
+                 if (reason := duplicate_reason(value, known))), "")
 
 
 def compact_text(value, limit=None):
@@ -444,7 +353,6 @@ def extract_departments(retrieved_text):
 def validate_candidate_index(candidates, search_dir):
     errors = []
     ids = set()
-    urls = set()
     content_root = Path(search_dir).resolve() / "content"
     for number, item in enumerate(candidates, 1):
         label = f"candidate_index.jsonl:{number}"
@@ -462,10 +370,7 @@ def validate_candidate_index(candidates, search_dir):
         normalized = normalize_url(url)
         if not isinstance(url, str) or not re.match(r"https?://", url):
             errors.append(f"{label} url必须是http(s)")
-        elif normalized in urls:
-            errors.append(f"{label} url重复：{url}")
-        else:
-            urls.add(normalized)
+        # 同一页面可能被复用到另一阶段/轮次，身份由统一比较器判断。
         if "content" in item or "summary" in item:
             errors.append(f"{label} 轻量索引不得含完整content/summary")
         expected_rel = f"content/{candidate_id}.json"
@@ -503,50 +408,9 @@ def load_candidate_content(candidate, search_dir):
 CLUSTER_PREFIX_MIN_FINGERPRINT = 16
 
 
-def _prefix_cluster_key(item, keys_seen):
-    """同院同日同族、标题指纹互为前缀时并入既有簇；返回要用的分组键。"""
-    fingerprint = item.get("title_fingerprint") or ""
-    if len(fingerprint) < CLUSTER_PREFIX_MIN_FINGERPRINT:
-        return None
-    buyer = buyer_fingerprint((item.get("source_fields") or {}).get("单位"))
-    if not buyer:
-        return None
-    publish_date = compact_text(item.get("publish_time"))[:10]
-    family = notice_family(item.get("title"))
-    for key, (known_fp, known_buyer, known_date, known_family) in keys_seen.items():
-        if known_buyer != buyer or known_date != publish_date or known_family != family:
-            continue
-        if known_fp.startswith(fingerprint) or fingerprint.startswith(known_fp):
-            return key
-    return None
-
-
 def cluster_candidates(candidates):
-    groups = {}
-    order = []
-    prefix_index = {}
-    for item in candidates:
-        key = item.get("title_fingerprint") or item["candidate_id"]
-        if len(key) < 8:
-            key = item["candidate_id"]
-        if key not in groups:
-            merged_into = _prefix_cluster_key(item, prefix_index)
-            if merged_into is not None:
-                key = merged_into
-            else:
-                groups[key] = []
-                order.append(key)
-                prefix_index[key] = (
-                    item.get("title_fingerprint") or "",
-                    buyer_fingerprint((item.get("source_fields") or {}).get("单位")),
-                    compact_text(item.get("publish_time"))[:10],
-                    notice_family(item.get("title")),
-                )
-        groups[key].append(item)
-
     result = []
-    for key in order:
-        members = groups[key]
+    for members in group_candidates(candidates):
         # 前缀合并进来的成员里，汇总页的标题更短、字段更空。代表取权威级别最高的；
         # 同级别时取标题更长的那条——它才是带预算和具体标的的明细页。
         members = sorted(
@@ -558,11 +422,16 @@ def cluster_candidates(candidates):
             reverse=True,
         )
         representative = members[0].copy()
+        remember_aliases(representative, *members)
         representative["cluster_members"] = [member["candidate_id"] for member in members]
         representative["alternate_sources"] = [
             {"candidate_id": member["candidate_id"], "site_name": member.get("site_name", ""), "url": member["url"]}
             for member in members[1:]
         ]
+        for member in members:
+            for alternate in member.get("alternate_sources") or []:
+                if alternate not in representative["alternate_sources"]:
+                    representative["alternate_sources"].append(alternate)
         representative["found_by_query"] = sorted({
             query for member in members for query in member.get("found_by_query", [])
         })
@@ -655,21 +524,12 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
     seen_records = seen_data.get("records")
     if not isinstance(seen_records, list):
         raise PipelineError(f"{seen_path}必须含records数组")
-    known_keys = set()
-    known_identities = []
-    for record in seen_records:
-        known_keys.update(historical_identity_keys(
-            record.get("标题"), seen_url(record), record.get("发布时间"),
-            record.get("单位"),
-        ))
-        identity = title_identity(
-            record.get("标题"), record.get("发布时间"), record.get("单位")
-        )
-        if identity:
-            known_identities.append(identity)
+    known = IdentityIndex(r for r in seen_records if r.get("_pushed") is True)
+    approved = approved_index(seen_data)
 
     queue = []
     already_seen = []
+    dedup_review = []
     screened_out = []
     concluded = []
     hospital_index = get_default_index()
@@ -677,20 +537,19 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
     for item in clustered:
         # 采购人取候选索引里的 source_fields，它在 write_candidates 阶段就已落盘，
         # 这里还没到 load_candidate_content。
-        item_buyer = (item.get("source_fields") or {}).get("单位")
-        item_keys = historical_identity_keys(
-            item.get("title"), item.get("url"), item.get("publish_time"), item_buyer,
-        )
-        if item_keys & known_keys:
-            already_seen.append({**item, "skip_reason": "与已成功推送记录身份重复"})
+        duplicate, reason = known.find(item)
+        if duplicate is not None:
+            already_seen.append({**item, "skip_reason": reason,
+                                 "matched_feishu_id": duplicate.get("_feishu_id"),
+                                 "matched_title": duplicate.get("标题")})
             continue
-        # 严格键之外的两类同一公告：台账缺采购人、来源截断标题（见 title_identity_duplicate）。
-        loose_reason = title_identity_duplicate(
-            title_identity(item.get("title"), item.get("publish_time"), item_buyer),
-            known_identities,
-        )
-        if loose_reason:
-            already_seen.append({**item, "skip_reason": f"与已成功推送记录身份重复（{loose_reason}）"})
+        possible, reason = known.possible(item)
+        # 人工核对已判定「不是重复」的公告不再反复扣下，否则它每轮都卡在待核对里。
+        if possible is not None and approved.find(item)[0] is None:
+            dedup_review.append({**item, "decision": "manual", "reason": reason,
+                                 "matched_feishu_id": possible.get("_feishu_id"),
+                                 "matched_title": possible.get("标题"),
+                                 "matched_url": possible.get("链接")})
             continue
         exclusion = is_clear_exclude(item.get("title", ""))
         if exclusion:
@@ -787,6 +646,7 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
     pipeline_dir.mkdir(parents=True, exist_ok=True)
     write_jsonl(pipeline_dir / "queue.jsonl", queue)
     write_jsonl(pipeline_dir / "already_seen.jsonl", already_seen)
+    write_jsonl(pipeline_dir / "dedup_review.jsonl", dedup_review)
     write_jsonl(pipeline_dir / "screened_out.jsonl", screened_out)
     write_jsonl(pipeline_dir / "concluded.jsonl", concluded)
 
@@ -836,6 +696,7 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             "clusters": len(clustered),
             "queued": len(queue),
             "already_seen": len(already_seen),
+            "dedup_review": len(dedup_review),
             "screened_out": len(screened_out),
             "concluded": len(concluded),
             "queued_broad_signal_only": sum(
@@ -1339,6 +1200,43 @@ def find_queue_candidate(pipeline_dir, candidate_id):
     )
 
 
+def review_identity_record(item):
+    """待核对候选的身份切片；台账只需要认出这条公告，不需要它的正文与证据。"""
+    fields = item.get("source_fields") or {}
+    return {
+        "标题": item.get("标题") or item.get("title") or "",
+        "单位": item.get("单位") or fields.get("单位") or "",
+        "发布时间": item.get("发布时间") or item.get("publish_time") or "",
+        "链接": item.get("链接") or item.get("url") or "",
+        "项目编号": item.get("项目编号") or fields.get("项目编号") or "",
+        "bid_id": item.get("bid_id") or "",
+        "alternate_sources": item.get("alternate_sources") or [],
+        "_candidate_id": item.get("candidate_id", ""),
+    }
+
+
+def resolve_review_item(run_dir, candidate_id, outcome, note):
+    """人工核对飞书后给 dedup_review.jsonl 里的候选定性。不发送任何请求。"""
+    manifest_path, manifest = get_manifest(run_dir)
+    pipeline_dir = Path(manifest["pipeline_dir"])
+    item = next(
+        (row for row in load_jsonl(pipeline_dir / "dedup_review.jsonl")
+         if row.get("candidate_id") == candidate_id),
+        None,
+    )
+    if item is None:
+        raise PipelineError(f"本次运行的待核对清单里没有{candidate_id}")
+    result = resolve_review(manifest["seen_path"], review_identity_record(item), outcome, note)
+    result["candidate_id"] = candidate_id
+    result["标题"] = item.get("title") or result.get("标题", "")
+    # 队列在 prepare 时就已定稿，放行的公告要重建队列才能进批次。
+    result["next_action"] = (
+        "已登记为重复，无需再处理" if outcome == "duplicate"
+        else f"重跑 prepare --search-dir {manifest['search_dir']} --force 使其进入队列"
+    )
+    return result
+
+
 def sync_query_stats(manifest, ledger_records):
     stats_path = ROOT / "data" / "query_stats.json"
     if not stats_path.exists():
@@ -1360,13 +1258,20 @@ def sync_query_stats(manifest, ledger_records):
 
 
 def record_push(run_dir, receipt_path):
+    manifest_path, _ = get_manifest(run_dir)
+    with ledger_lock(manifest_path):
+        return _record_push_locked(run_dir, receipt_path)
+
+
+def _record_push_locked(run_dir, receipt_path):
     manifest_path, manifest = get_manifest(run_dir)
     pipeline_dir = Path(manifest["pipeline_dir"]).resolve()
     receipt_path = Path(receipt_path).resolve()
     if not is_within(receipt_path, pipeline_dir / "receipts"):
         raise PipelineError("回执必须位于本次运行的pipeline/receipts目录")
     receipt = load_json(receipt_path)
-    if receipt.get("http_status") != 200 or receipt.get("feishu_code") != 0:
+    skipped = receipt.get("delivery_status") == "already_seen"
+    if not skipped and (receipt.get("http_status") != 200 or receipt.get("feishu_code") != 0):
         raise PipelineError("回执未同时确认HTTP 200与飞书code: 0")
     if receipt.get("flow") != "push" or not isinstance(receipt.get("candidate_id"), str):
         raise PipelineError("回执缺少有效flow或candidate_id")
@@ -1399,62 +1304,28 @@ def record_push(run_dir, receipt_path):
             raise PipelineError("该候选已有不同哈希的成功记录")
         return compact_status(manifest) | {"idempotent": True}
 
-    seen_path = Path(manifest["seen_path"])
-    seen = load_json(seen_path)
-    records = seen.get("records")
-    if not isinstance(records, list):
-        raise PipelineError(f"{seen_path}必须含records数组")
     payload = load_json(payload_path)
     candidate = find_queue_candidate(pipeline_dir, candidate_id)
     if candidate is None:
         raise PipelineError(f"queue.jsonl中找不到candidate_id：{candidate_id}")
-    normalized_link = normalize_url(payload["链接"])
-    payload_keys = historical_identity_keys(
-        payload.get("标题"), payload.get("链接"), payload.get("发布时间"), payload.get("单位")
-    )
-    payload_identity = title_identity(
-        payload.get("标题"), payload.get("发布时间"), payload.get("单位")
-    )
-    duplicate = next((
-        record for record in records
-        if payload_keys & historical_identity_keys(
-            record.get("标题"), seen_url(record), record.get("发布时间"), record.get("单位")
-        )
-        # 与 prepare 用同一口径，否则同一条公告会在台账里留下两行近似记录。
-        or title_identity_duplicate(payload_identity, [identity for identity in (
-            title_identity(record.get("标题"), record.get("发布时间"), record.get("单位")),
-        ) if identity])
-    ), None)
-    if duplicate:
-        # 老版本 seen 记录没有后来新增的字段（如 项目编号）。缺键按一致处理，
-        # 否则同一条公告的重复推送会被误判成“内容不同”而中断。
-        same = all(
-            field not in duplicate or duplicate[field] == payload[field]
-            for field in WEBHOOK_FIELDS
-        )
-        if not (same and duplicate.get("_pushed") is True):
-            raise PipelineError("seen中已存在同链接但内容不同的记录")
+    if skipped:
+        with ledger_lock(manifest["seen_path"]):
+            identity_record = dict(payload)
+            remember_aliases(identity_record, candidate)
+            existing, _ = confirmed_index(read_ledger(manifest["seen_path"])).find(identity_record)
+            if existing is None:
+                raise PipelineError("跳过回执在共享台账中没有已入账记录")
     else:
-        today = datetime.now().astimezone().date().isoformat()
-        records.append({
-            # 摘要不入台账：它占 seen 体积的近四成，而去重只用
-            # 标题/链接/发布时间/单位 四个字段，摘要一个字节都用不上。
-            **{k: v for k, v in payload.items() if k not in SEEN_OMITTED_FIELDS},
-            "_candidate_id": candidate_id,
-            "_first_seen": today,
-            "_last_seen": today,
-            "_pushed": True,
-            "_found_by_query": candidate.get("found_by_query", []),
-        })
-    atomic_write_json(seen_path, seen)
+        remember_confirmed(manifest["seen_path"], payload, candidate, receipt.get("confirmed_at"))
 
     ledger_records.append({
         "flow": "push",
         "candidate_id": candidate_id,
         "payload_path": str(payload_path),
         "payload_sha256": receipt["payload_sha256"],
-        "http_status": 200,
-        "feishu_code": 0,
+        "delivery_status": "already_seen" if skipped else "confirmed",
+        "http_status": receipt.get("http_status"),
+        "feishu_code": receipt.get("feishu_code"),
         "found_by_query": candidate.get("found_by_query", []),
         "confirmed_at": receipt.get("confirmed_at"),
         "recorded_at": now_iso(),
@@ -1463,7 +1334,9 @@ def record_push(run_dir, receipt_path):
     sync_query_stats(manifest, ledger_records)
 
     expected = manifest.get("decision_counts", {}).get("create", 0)
-    manifest["push_counts"] = {"confirmed": len(ledger_records), "expected": expected}
+    skipped_count = sum(r.get("delivery_status") == "already_seen" for r in ledger_records)
+    manifest["push_counts"] = {"confirmed": len(ledger_records) - skipped_count,
+                               "skipped": skipped_count, "expected": expected}
     if expected and len(ledger_records) >= expected:
         manifest["state"] = "PUSHED"
         manifest["next_action"] = "COMPLETE"
@@ -1507,6 +1380,12 @@ def main():
     record_parser.add_argument("--run-dir", required=True)
     record_parser.add_argument("--receipt", required=True)
 
+    review_parser = sub.add_parser("resolve-review", help="核对飞书后给疑似重复定性，不发送请求")
+    review_parser.add_argument("--run-dir", required=True)
+    review_parser.add_argument("--candidate-id", required=True)
+    review_parser.add_argument("--outcome", choices=["duplicate", "new"], required=True)
+    review_parser.add_argument("--note", default="")
+
     args = parser.parse_args()
     try:
         if args.command == "prepare":
@@ -1535,8 +1414,12 @@ def main():
             print(json.dumps(validate_payload_file(args.payload), ensure_ascii=False, indent=2))
         elif args.command == "record-push":
             print(json.dumps(record_push(args.run_dir, args.receipt), ensure_ascii=False, indent=2))
+        elif args.command == "resolve-review":
+            print(json.dumps(resolve_review_item(
+                args.run_dir, args.candidate_id, args.outcome, args.note,
+            ), ensure_ascii=False, indent=2))
         return 0
-    except PipelineError as exc:
+    except (PipelineError, LedgerError) as exc:
         if getattr(args, "command", None) == "submit-batch":
             print(json.dumps({
                 "accepted": False,

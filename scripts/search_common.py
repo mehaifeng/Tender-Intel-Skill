@@ -13,7 +13,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 # `sk` 是知了标讯站内链接上的会话参数，同一条公告每次调用取回的值都不同，
 # 不剥掉就会让同一条公告在跨运行去重时变成两个身份。
-TRACKING_KEYS = {"spm", "from", "source", "track", "timestamp", "t", "sk"}
+TRACKING_KEYS = {"spm", "from", "track", "sk"}
 ZLBX_CONTENT_RE = re.compile(r"/content/(\d+)(?:/[a-z0-9]+)*/?$", re.I)
 ZLBX_HOSTS = {"zhiliaobiaoxun.com", "www.zhiliaobiaoxun.com"}
 SOURCE_PRIORITIES = {
@@ -332,13 +332,16 @@ def canonical_url(raw):
                 continue
             query.append((key, value))
         path = parts.path.rstrip("/") or "/"
-        return urlunsplit((scheme, host, path, urlencode(query), ""))
+        # SPA 公告把详情 ID 放在 #/route?uuid=... 中，不能像普通页内锚点一样删掉。
+        fragment = parts.fragment if parts.fragment.startswith(("/", "!")) else ""
+        return urlunsplit((scheme, host, path, urlencode(sorted(query)), fragment))
     except ValueError:
         return str(raw or "").strip().rstrip("/")
 
 
-def candidate_id(url):
-    return "C" + hashlib.sha256(canonical_url(url).encode("utf-8")).hexdigest()[:12].upper()
+def candidate_id(url, discriminator=""):
+    value = canonical_url(url) + ("\n" + discriminator if discriminator else "")
+    return "C" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:12].upper()
 
 
 def zlbx_bid_id(url):
@@ -397,34 +400,29 @@ def extract_project_id(text):
 
 
 def identity_keys(candidate, content=None):
-    """保守身份键：同 URL、同标讯 ID、同标题，或同项目号+同公告阶段。"""
-    content = content or {}
-    url = canonical_url(candidate.get("url") or content.get("source_url"))
-    keys = {("url", url)} if url else set()
-    for source in (candidate, content):
-        bid_id = source.get("bid_id")
-        if bid_id:
-            keys.add(("zlbx", str(bid_id)))
-    for alternate in candidate.get("alternate_sources") or []:
-        alternate_id = zlbx_bid_id(alternate.get("url"))
-        if alternate_id:
-            keys.add(("zlbx", alternate_id))
-    site_id = zlbx_bid_id(url)
-    if site_id:
-        keys.add(("zlbx", site_id))
-    fingerprint = candidate.get("title_fingerprint") or title_fingerprint(candidate.get("title"))
-    if len(fingerprint) >= 8:
-        keys.add(("title", fingerprint))
-    source_fields = content.get("source_fields") or candidate.get("source_fields") or {}
-    project_id = source_fields.get("项目编号") or extract_project_id(
-        "\n".join((content.get("summary", ""), content.get("content", "")))
-    )
-    family = notice_family(
-        source_fields.get("公告类型") or candidate.get("title") or content.get("title")
-    )
-    if project_id and family:
-        keys.add(("project_notice", project_id.lower(), family))
-    return keys
+    """仅公开强身份键；完整公告比较统一由 tender_identity 负责。"""
+    from tender_identity import identity
+    ident = identity({**(content or {}), **candidate})
+    return {("url", u) for u in ident.urls} | {("id", i) for i in ident.ids}
+
+
+def group_candidates(candidates):
+    """不做裸标题或意向汇总前缀的合并；每个成员都必须互相兼容。"""
+    from tender_identity import IdentityIndex, identity, duplicate_reason
+    groups = []
+    lookup = IdentityIndex()
+    owner = {}
+    for candidate in candidates:
+        known, _ = lookup.find(candidate)
+        group = owner.get(id(known)) if known is not None else None
+        ident = identity(candidate)
+        if group is None or not all(duplicate_reason(ident, identity(m)) for m in group):
+            group = []
+            groups.append(group)
+        group.append(candidate)
+        owner[id(candidate)] = group
+        lookup.add(candidate)
+    return groups
 
 
 def write_candidates(candidates, out_dir, run_date):
@@ -435,10 +433,16 @@ def write_candidates(candidates, out_dir, run_date):
     index = []
     for item in candidates:
         url = canonical_url(item.get("url"))
-        cid = candidate_id(url)
+        discriminator = str(item.get("bid_id") or "") or (
+            title_fingerprint(item.get("title")) + "|" + str(item.get("publish_time") or "")
+        )
+        cid = candidate_id(url, discriminator)
         content_rel = f"content/{cid}.json"
         full = {
+            "_identity_urls": item.get("_identity_urls", []),
+            "_identity_ids": item.get("_identity_ids", []),
             "candidate_id": cid,
+            "identity_discriminator": discriminator,
             "bid_id": item.get("bid_id") or "",
             "title": item.get("title") or "",
             "source_url": url,
@@ -459,6 +463,9 @@ def write_candidates(candidates, out_dir, run_date):
         )
         teaser_source = full["summary"] or full["content"]
         index.append({
+            "identity_discriminator": discriminator,
+            "_identity_urls": full["_identity_urls"],
+            "_identity_ids": full["_identity_ids"],
             "candidate_id": cid,
             "bid_id": full["bid_id"],
             "title": full["title"],
@@ -518,22 +525,6 @@ def load_source_candidates(source_dir):
     return rows
 
 
-class _UnionFind:
-    def __init__(self, size):
-        self.parent = list(range(size))
-
-    def find(self, item):
-        while self.parent[item] != item:
-            self.parent[item] = self.parent[self.parent[item]]
-            item = self.parent[item]
-        return item
-
-    def union(self, left, right):
-        a, b = self.find(left), self.find(right)
-        if a != b:
-            self.parent[b] = a
-
-
 def _preference(candidate, content):
     priority = int(
         candidate.get("source_priority")
@@ -556,21 +547,12 @@ def merge_source_dirs(source_dirs):
     rows = []
     for source_dir in source_dirs:
         rows.extend(load_source_candidates(source_dir))
-    uf = _UnionFind(len(rows))
-    owner = {}
-    for index, (candidate, content) in enumerate(rows):
-        for key in identity_keys(candidate, content):
-            if key in owner:
-                uf.union(index, owner[key])
-            else:
-                owner[key] = index
-
-    groups = {}
-    for index, row in enumerate(rows):
-        groups.setdefault(uf.find(index), []).append(row)
+    combined = [{**content, **candidate} for candidate, content in rows]
+    originals = {id(c): row for c, row in zip(combined, rows)}
+    groups = [[originals[id(c)] for c in group] for group in group_candidates(combined)]
 
     merged = []
-    for members in groups.values():
+    for members in groups:
         members.sort(key=lambda row: _preference(*row), reverse=True)
         primary_candidate, primary_content = members[0]
         source_names = []
@@ -578,6 +560,9 @@ def merge_source_dirs(source_dirs):
         found_by_query = set()
         alternates = []
         for candidate, content in members:
+            for alternate in candidate.get("alternate_sources") or []:
+                if alternate not in alternates:
+                    alternates.append(alternate)
             for source in candidate.get("sources") or [candidate.get("source") or "unknown"]:
                 if source not in source_names:
                     source_names.append(source)
@@ -593,7 +578,11 @@ def merge_source_dirs(source_dirs):
                     "url": canonical_url(candidate.get("url")),
                 })
 
+        from tender_identity import remember_aliases
+        aliases = {}
+        remember_aliases(aliases, *[{**content, **candidate} for candidate, content in members])
         merged.append({
+            **aliases,
             "bid_id": primary_candidate.get("bid_id") or primary_content.get("bid_id") or "",
             "title": primary_candidate.get("title") or primary_content.get("title") or "",
             "site_name": primary_candidate.get("site_name") or "",
