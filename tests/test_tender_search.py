@@ -14,7 +14,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import tender_search  # noqa: E402
 from tender_search import AUTH_ERROR_EXIT_CODE, build_command  # noqa: E402
 from tender_pipeline import prepare, PipelineError  # noqa: E402
-from tender_ledger import save_ledger  # noqa: E402
+from tender_ledger import LedgerError, fetch_ledger, save_snapshot, snapshot_path  # noqa: E402
+sys.path.insert(0, str(ROOT / "tests"))
+import fake_feishu  # noqa: E402
 
 
 class TenderSearchEntryTests(unittest.TestCase):
@@ -45,9 +47,30 @@ class TenderSearchEntryTests(unittest.TestCase):
             stderr = "错误：知了标讯拒绝了这个 API Key"
 
         argv = ["tender_search.py", "--out-dir", str(out_dir), "--time-range", "72h"]
+        client, _ = fake_feishu.client()
         with patch.object(tender_search.subprocess, "run", return_value=Completed()), \
+             patch.object(tender_search, "fetch_ledger", lambda: fetch_ledger(client)), \
              patch.object(sys, "argv", argv):
             return tender_search.main()
+
+    def test_ledger_fetch_failure_is_not_mistaken_for_an_empty_day(self):
+        """拉不到台账就没法判重；必须留下摘要让 prepare 拒绝在这个目录上排队。"""
+        def broken():
+            raise LedgerError("拉取飞书台账失败，禁止按空台账继续：连接超时")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "run"
+            argv = ["tender_search.py", "--out-dir", str(out_dir), "--time-range", "72h"]
+            with patch.object(tender_search, "fetch_ledger", broken), \
+                 patch.object(tender_search.subprocess, "run") as adapter, \
+                 patch.object(sys, "argv", argv):
+                self.assertEqual(tender_search.main(), 2)
+            adapter.assert_not_called()
+            summary = json.loads((out_dir / "search_summary.json").read_text(encoding="utf-8"))
+            self.assertTrue(summary["ledger_fetch_failed"])
+            self.assertEqual(summary["candidate_count"], 0)
+            with self.assertRaises(PipelineError):
+                prepare(out_dir, 10, "daily-push")
 
     def test_auth_failure_never_reuses_the_same_day_candidates(self):
         """同一天早先跑成功过：失败后若复用旧目录，会把昨天的情报当今天的再报一遍。"""
@@ -82,10 +105,10 @@ class TenderSearchEntryTests(unittest.TestCase):
                 "source": "zlbx", "exit_code": 3, "source_auth_failed": True,
                 "candidate_count": 0,
             }), encoding="utf-8")
-            seen = Path(tmp) / "seen.json"
-            save_ledger(seen, {"records": []})
+            client, _ = fake_feishu.client()
+            save_snapshot(snapshot_path(run), fetch_ledger(client))
             with self.assertRaises(PipelineError) as caught:
-                prepare(run, seen, 10, "daily-push")
+                prepare(run, 10, "daily-push")
             self.assertIn("凭证", str(caught.exception))
 
     def test_dry_run_needs_no_credentials(self):

@@ -16,10 +16,12 @@ import tempfile
 from datetime import date, datetime
 from pathlib import Path
 
+from dedup_match import MAX_SEMANTIC_PAIRS, LedgerMatcher, review_row
+from feishu_client import FeishuError
 from hospital_match import get_default_index
 from tender_identity import IdentityIndex, remember_aliases
-from tender_ledger import (LedgerError, ledger_lock, remember_confirmed, read_ledger,
-                           confirmed_index, approved_index, resolve_review)
+from tender_ledger import (LedgerError, ledger_lock, read_snapshot, refresh_snapshot,
+                           snapshot_path)
 from search_common import (
     BROAD_SIGNAL_GROUPS,
     aggregate_notice,
@@ -37,7 +39,6 @@ from search_common import (
 
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SEEN = ROOT / "data" / "seen.json"
 MODES = {"daily-push", "search-only", "verify-only", "report-only"}
 DEFAULT_PREPARE_MODE = "daily-push"
 DECISIONS = {"create", "exclude", "manual"}
@@ -48,9 +49,7 @@ WEBHOOK_FIELDS = [
     "医院全名", "医院等级",
 ]
 
-# 推送成功后不写进 seen.json 的业务字段：对去重无用，只会让台账无限膨胀。
-# record_push 的重复判定用 `field not in duplicate` 兜底，缺字段按一致处理。
-SEEN_OMITTED_FIELDS = frozenset({"内容（检索的摘要）"})
+SEMANTIC_DECISIONS = "semantic_decisions.json"
 HIGH_RISK_FIELDS = {
     "项目编号", "单位", "地区", "所属省/市", "截止时间", "预算", "采购方式", "科室", "医院全名",
 }
@@ -545,10 +544,6 @@ def cluster_candidates(candidates):
     return result
 
 
-def seen_url(record):
-    return record.get("链接") or record.get("source_url") or ""
-
-
 def canonical_province(value, city=""):
     raw = "" if value in (None, "", "null") else str(value).strip()
     city = "" if city in (None, "", "null") else str(city).strip()
@@ -606,7 +601,27 @@ def candidate_publish_date(candidate):
     return match.group(0) if match else "null"
 
 
-def prepare(search_dir, seen_path, batch_size, mode, force=False):
+def load_semantic_decisions(pipeline_dir):
+    """模型语义判定的结论。属于本次运行，prepare --force 重建队列时必须保留。"""
+    path = Path(pipeline_dir) / SEMANTIC_DECISIONS
+    if not path.exists():
+        return []
+    data = load_json(path)
+    decisions = data.get("decisions")
+    if not isinstance(decisions, list):
+        raise PipelineError(f"{path} 的 decisions 必须是数组")
+    return decisions
+
+
+def ledger_for(search_dir, refresh):
+    """取本次运行的台账快照。没有快照或要求刷新时直接拉飞书，拉不到就停。"""
+    path = snapshot_path(search_dir)
+    if refresh or not path.exists():
+        return refresh_snapshot(search_dir)
+    return path, read_snapshot(path)
+
+
+def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
     if mode not in MODES:
         raise PipelineError(f"mode 必须是 {sorted(MODES)} 之一")
     if batch_size < 1 or batch_size > 25:
@@ -634,16 +649,12 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
                 f"检索来源以退出码 {search_summary['exit_code']} 结束，本次结果不完整；"
                 f"原因：{search_summary.get('failure_reason') or '见检索输出'}"
             )
-    seen_data = load_json(seen_path)
-    seen_records = seen_data.get("records")
-    if not isinstance(seen_records, list):
-        raise PipelineError(f"{seen_path}必须含records数组")
-    known = IdentityIndex(r for r in seen_records if r.get("_pushed") is True)
-    approved = approved_index(seen_data)
+    ledger_path, ledger = ledger_for(search_dir, refresh_ledger)
+    matcher = LedgerMatcher(ledger["records"], load_semantic_decisions(pipeline_dir))
 
     queue = []
     already_seen = []
-    dedup_review = []
+    semantic_review = []
     screened_out = []
     concluded = []
     hospital_index = get_default_index()
@@ -651,19 +662,19 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
     for item in clustered:
         # 采购人取候选索引里的 source_fields，它在 write_candidates 阶段就已落盘，
         # 这里还没到 load_candidate_content。
-        duplicate, reason = known.find(item)
-        if duplicate is not None:
-            already_seen.append({**item, "skip_reason": reason,
-                                 "matched_feishu_id": duplicate.get("_feishu_id"),
-                                 "matched_title": duplicate.get("标题")})
+        # 正文只在标题落进相似窄带时才读；正文已在适配器阶段落盘，读它不花接口调用。
+        def candidate_body(item=item):
+            _, content = load_candidate_content(item, search_dir)
+            return compose_summary(content.get("summary"), content.get("product_list"))
+
+        match = matcher.check(item, candidate_body)
+        if match.verdict == "duplicate":
+            already_seen.append({**item, "skip_reason": match.reason, "match_layer": match.layer,
+                                 "matched_feishu_id": (match.matched or {}).get("_feishu_id"),
+                                 "matched_title": (match.matched or {}).get("标题")})
             continue
-        possible, reason = known.possible(item)
-        # 人工核对已判定「不是重复」的公告不再反复扣下，否则它每轮都卡在待核对里。
-        if possible is not None and approved.find(item)[0] is None:
-            dedup_review.append({**item, "decision": "manual", "reason": reason,
-                                 "matched_feishu_id": possible.get("_feishu_id"),
-                                 "matched_title": possible.get("标题"),
-                                 "matched_url": possible.get("链接")})
+        if match.verdict == "semantic":
+            semantic_review.append({**review_row(item, match), "reason": match.reason})
             continue
         exclusion = is_clear_exclude(item.get("title", ""))
         if exclusion:
@@ -762,10 +773,15 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             enriched["hospital_suggestion"] = suggestion
         queue.append(enriched)
 
+    if len(semantic_review) > MAX_SEMANTIC_PAIRS:
+        raise PipelineError(
+            f"待语义判定的候选有 {len(semantic_review)} 条，超过上限 {MAX_SEMANTIC_PAIRS}；"
+            "先查检索窗口与台账是否异常，不要让模型逐条比对整批"
+        )
     pipeline_dir.mkdir(parents=True, exist_ok=True)
     write_jsonl(pipeline_dir / "queue.jsonl", queue)
     write_jsonl(pipeline_dir / "already_seen.jsonl", already_seen)
-    write_jsonl(pipeline_dir / "dedup_review.jsonl", dedup_review)
+    write_jsonl(pipeline_dir / "semantic_review.jsonl", semantic_review)
     write_jsonl(pipeline_dir / "screened_out.jsonl", screened_out)
     write_jsonl(pipeline_dir / "concluded.jsonl", concluded)
 
@@ -811,14 +827,16 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
         "search_dir": str(search_dir),
         "search_summary_path": str(search_summary_path) if search_summary else None,
         "pipeline_dir": str(pipeline_dir),
-        "seen_path": str(Path(seen_path).resolve()),
+        "ledger_snapshot": str(Path(ledger_path).resolve()),
+        "ledger_fetched_at": ledger["fetched_at"],
+        "ledger_row_count": ledger["row_count"],
         "batch_size": batch_size,
         "counts": {
             "indexed": len(candidates),
             "clusters": len(clustered),
             "queued": len(queue),
             "already_seen": len(already_seen),
-            "dedup_review": len(dedup_review),
+            "semantic_review": len(semantic_review),
             "screened_out": len(screened_out),
             "concluded": len(concluded),
             "queued_broad_signal_only": sum(
@@ -828,7 +846,8 @@ def prepare(search_dir, seen_path, batch_size, mode, force=False):
             "completed_batches": 0,
         },
         "batches": batches,
-        "next_action": "PROCESS_BATCH" if batches else "REPORT_NO_CANDIDATES",
+        "next_action": ("RESOLVE_SEMANTIC" if semantic_review
+                        else "PROCESS_BATCH" if batches else "REPORT_NO_CANDIDATES"),
     }
     if search_summary:
         manifest["search"] = {
@@ -1334,41 +1353,52 @@ def find_queue_candidate(pipeline_dir, candidate_id):
     )
 
 
-def review_identity_record(item):
-    """待核对候选的身份切片；台账只需要认出这条公告，不需要它的正文与证据。"""
-    fields = item.get("source_fields") or {}
-    return {
-        "标题": item.get("标题") or item.get("title") or "",
-        "单位": item.get("单位") or fields.get("单位") or "",
-        "发布时间": item.get("发布时间") or item.get("publish_time") or "",
-        "链接": item.get("链接") or item.get("url") or "",
-        "项目编号": item.get("项目编号") or fields.get("项目编号") or "",
-        "bid_id": item.get("bid_id") or "",
-        "alternate_sources": item.get("alternate_sources") or [],
-        "_candidate_id": item.get("candidate_id", ""),
-    }
-
-
-def resolve_review_item(run_dir, candidate_id, outcome, note):
-    """人工核对飞书后给 dedup_review.jsonl 里的候选定性。不发送任何请求。"""
+def resolve_semantic(run_dir, decisions_path):
+    """登记模型对 semantic_review.jsonl 的语义判定。只写本地结论，不发送请求。"""
     manifest_path, manifest = get_manifest(run_dir)
     pipeline_dir = Path(manifest["pipeline_dir"])
-    item = next(
-        (row for row in load_jsonl(pipeline_dir / "dedup_review.jsonl")
-         if row.get("candidate_id") == candidate_id),
-        None,
-    )
-    if item is None:
-        raise PipelineError(f"本次运行的待核对清单里没有{candidate_id}")
-    result = resolve_review(manifest["seen_path"], review_identity_record(item), outcome, note)
-    result["candidate_id"] = candidate_id
-    result["标题"] = item.get("title") or result.get("标题", "")
-    # 队列在 prepare 时就已定稿，放行的公告要重建队列才能进批次。
-    result["next_action"] = (
-        "已登记为重复，无需再处理" if outcome == "duplicate"
-        else f"重跑 prepare --search-dir {manifest['search_dir']} --force 使其进入队列"
-    )
-    return result
+    pending = load_jsonl(pipeline_dir / "semantic_review.jsonl")
+    known_pairs = {p["pair_id"]: row for row in pending for p in row.get("台账候选", [])}
+    if not known_pairs:
+        raise PipelineError("本次运行没有待语义判定的配对")
+    incoming = load_json(decisions_path)
+    if isinstance(incoming, dict):
+        incoming = incoming.get("decisions")
+    if not isinstance(incoming, list) or not incoming:
+        raise PipelineError("判定文件必须是非空数组，或含 decisions 数组的对象")
+
+    accepted = {}
+    for row in incoming:
+        pair = str((row or {}).get("pair_id") or "")
+        if pair not in known_pairs:
+            raise PipelineError(f"判定文件里的 pair_id 不属于本次待判定清单：{pair}")
+        same = row.get("same")
+        if same is None:
+            same = row.get("是否同一公告")
+        if not isinstance(same, bool):
+            raise PipelineError(f"{pair} 缺少布尔的 same（是否同一公告）")
+        note = str(row.get("note") or row.get("依据") or "").strip()
+        if not note:
+            raise PipelineError(f"{pair} 必须给出判定依据")
+        accepted[pair] = {"pair_id": pair, "candidate_id": known_pairs[pair]["candidate_id"],
+                          "same": same, "note": note, "resolved_at": now_iso()}
+
+    path = pipeline_dir / SEMANTIC_DECISIONS
+    stored = {d["pair_id"]: d for d in load_semantic_decisions(pipeline_dir)}
+    stored.update(accepted)
+    atomic_write_json(path, {"schema_version": 1, "decisions": list(stored.values())})
+
+    undecided = sorted(set(known_pairs) - set(stored))
+    return {
+        "decisions_path": str(path),
+        "recorded": len(accepted),
+        "same": sum(1 for d in accepted.values() if d["same"]),
+        "different": sum(1 for d in accepted.values() if not d["same"]),
+        "undecided_pairs": undecided,
+        # 队列在 prepare 时就已定稿，放行的公告要重建队列才能进批次。
+        "next_action": (f"仍有 {len(undecided)} 个配对未判定" if undecided else
+                        f"重跑 prepare --search-dir {manifest['search_dir']} --force 使结论生效"),
+    }
 
 
 def sync_query_stats(manifest, ledger_records):
@@ -1442,15 +1472,15 @@ def _record_push_locked(run_dir, receipt_path):
     candidate = find_queue_candidate(pipeline_dir, candidate_id)
     if candidate is None:
         raise PipelineError(f"queue.jsonl中找不到candidate_id：{candidate_id}")
+    # 台账在飞书，本地不再登记。这里只核对回执与快照是否自洽。
+    snapshot = read_snapshot(manifest["ledger_snapshot"])
     if skipped:
-        with ledger_lock(manifest["seen_path"]):
-            identity_record = dict(payload)
-            remember_aliases(identity_record, candidate)
-            existing, _ = confirmed_index(read_ledger(manifest["seen_path"])).find(identity_record)
-            if existing is None:
-                raise PipelineError("跳过回执在共享台账中没有已入账记录")
-    else:
-        remember_confirmed(manifest["seen_path"], payload, candidate, receipt.get("confirmed_at"))
+        identity_record = dict(payload)
+        remember_aliases(identity_record, candidate)
+        if IdentityIndex(snapshot["records"]).find(identity_record)[0] is None:
+            raise PipelineError("跳过回执在飞书台账快照中找不到对应记录")
+    elif not receipt.get("feishu_record_id"):
+        raise PipelineError("成功回执缺少飞书 record_id")
 
     ledger_records.append({
         "flow": "push",
@@ -1460,6 +1490,8 @@ def _record_push_locked(run_dir, receipt_path):
         "delivery_status": "already_seen" if skipped else "confirmed",
         "http_status": receipt.get("http_status"),
         "feishu_code": receipt.get("feishu_code"),
+        "feishu_record_id": receipt.get("feishu_record_id"),
+        "feishu_id": receipt.get("feishu_id"),
         "found_by_query": candidate.get("found_by_query", []),
         "confirmed_at": receipt.get("confirmed_at"),
         "recorded_at": now_iso(),
@@ -1487,10 +1519,11 @@ def main():
 
     prepare_parser = sub.add_parser("prepare", help="建立去重、预筛、医院匹配和小批次队列")
     prepare_parser.add_argument("--search-dir", required=True)
-    prepare_parser.add_argument("--seen", default=str(DEFAULT_SEEN))
     prepare_parser.add_argument("--batch-size", type=int, default=10)
     prepare_parser.add_argument("--mode", choices=sorted(MODES), default=DEFAULT_PREPARE_MODE)
     prepare_parser.add_argument("--force", action="store_true")
+    prepare_parser.add_argument("--refresh-ledger", action="store_true",
+                                help="重新拉取飞书台账，覆盖本次运行目录里的快照")
 
     for command in ("status", "next-batch", "authorize-unattended"):
         command_parser = sub.add_parser(command)
@@ -1514,16 +1547,15 @@ def main():
     record_parser.add_argument("--run-dir", required=True)
     record_parser.add_argument("--receipt", required=True)
 
-    review_parser = sub.add_parser("resolve-review", help="核对飞书后给疑似重复定性，不发送请求")
+    review_parser = sub.add_parser("resolve-semantic", help="登记语义判定结论，不发送请求")
     review_parser.add_argument("--run-dir", required=True)
-    review_parser.add_argument("--candidate-id", required=True)
-    review_parser.add_argument("--outcome", choices=["duplicate", "new"], required=True)
-    review_parser.add_argument("--note", default="")
+    review_parser.add_argument("--decisions", required=True, help="判定结果 JSON 文件")
 
     args = parser.parse_args()
     try:
         if args.command == "prepare":
-            pipeline_dir, manifest = prepare(args.search_dir, args.seen, args.batch_size, args.mode, args.force)
+            pipeline_dir, manifest = prepare(args.search_dir, args.batch_size, args.mode,
+                                             args.force, args.refresh_ledger)
             print(json.dumps({"pipeline_dir": str(pipeline_dir), **compact_status(manifest)}, ensure_ascii=False, indent=2))
         elif args.command in {"status", "next-batch"}:
             manifest_path, manifest = get_manifest(args.run_dir)
@@ -1548,12 +1580,11 @@ def main():
             print(json.dumps(validate_payload_file(args.payload), ensure_ascii=False, indent=2))
         elif args.command == "record-push":
             print(json.dumps(record_push(args.run_dir, args.receipt), ensure_ascii=False, indent=2))
-        elif args.command == "resolve-review":
-            print(json.dumps(resolve_review_item(
-                args.run_dir, args.candidate_id, args.outcome, args.note,
-            ), ensure_ascii=False, indent=2))
+        elif args.command == "resolve-semantic":
+            print(json.dumps(resolve_semantic(args.run_dir, args.decisions),
+                             ensure_ascii=False, indent=2))
         return 0
-    except (PipelineError, LedgerError) as exc:
+    except (PipelineError, LedgerError, FeishuError) as exc:
         if getattr(args, "command", None) == "submit-batch":
             print(json.dumps({
                 "accepted": False,

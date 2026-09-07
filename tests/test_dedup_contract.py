@@ -9,13 +9,16 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 from tender_identity import identity, duplicate_reason, IdentityIndex, remember_aliases
-from tender_ledger import (ledger_lock, save_ledger, read_ledger, resolve_delivery,
-                           resolve_review, LedgerError)
+from tender_ledger import (ledger_lock, fetch_ledger, save_snapshot, snapshot_path,
+                           LedgerError)
 from search_common import canonical_url, write_candidates, merge_source_dirs
 from tender_pipeline import (cluster_candidates, prepare, record_push, canonicalize_create,
-                             resolve_review_item, PipelineError)
-from send_webhook import FIELDS, send_once, SendError, sha256_bytes
+                             resolve_semantic, PipelineError)
+from send_record import FIELDS, send_once, SendError, sha256_bytes, build_fields
+import fake_feishu
+from fake_feishu import FakeFeishu, ledger_row
 import zlbx_search
 
 
@@ -115,41 +118,108 @@ class IdentityContractTests(unittest.TestCase):
             self.assertEqual(len(merge_source_dirs([tmp])), 2)
 
     def test_seen_before_details_saves_request(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            seen = Path(tmp) / "seen.json"
-            save_ledger(seen, {"records": [row(_pushed=True)]})
-            item = {"bid_id": 9, "title": "甲医院过敏原试剂采购公告", "caller_name": "甲医院",
-                    "pub_time": "2026-09-04", "url": "https://x.org/mirror", "sm_names": ["过敏原试剂"]}
-            with patch.object(zlbx_search, "collect_listings", return_value={9: item}), \
-                 patch.object(zlbx_search, "fetch_detail") as detail:
-                candidates, stats = zlbx_search.collect(None, ["过敏"], datetime(2026,9,3), datetime(2026,9,5), 8, 50, 60, seen)
-            detail.assert_not_called()
-            self.assertEqual(candidates, [])
-            self.assertEqual(stats["already_seen_before_detail_count"], 1)
+        item = {"bid_id": 9, "title": "甲医院过敏原试剂采购公告", "caller_name": "甲医院",
+                "pub_time": "2026-09-04", "url": "https://x.org/mirror", "sm_names": ["过敏原试剂"]}
+        with patch.object(zlbx_search, "collect_listings", return_value={9: item}), \
+             patch.object(zlbx_search, "fetch_detail") as detail:
+            candidates, stats = zlbx_search.collect(
+                None, ["过敏"], datetime(2026, 9, 3), datetime(2026, 9, 5), 8, 50, 60,
+                ledger_records=[row(_pushed=True)])
+        detail.assert_not_called()
+        self.assertEqual(candidates, [])
+        self.assertEqual(stats["already_seen_before_detail_count"], 1)
 
 
-class Response:
-    status = 200
-    def __enter__(self): return self
-    def __exit__(self, *args): pass
-    def read(self): return b'{"code":0}'
+class FeishuLedgerTests(unittest.TestCase):
+    """接口返回的富文本与 URL 对象必须还原成判重用得上的纯文本。"""
+
+    def test_rows_are_normalized_for_identity(self):
+        client, _ = fake_feishu.client([ledger_row()])
+        ledger = fetch_ledger(client)
+        record = ledger["records"][0]
+        self.assertEqual(record["标题"], "甲医院过敏原试剂采购公告")
+        self.assertEqual(record["链接"], "https://example.org/a")
+        self.assertEqual(record["_feishu_id"], "ZB-000001")
+        self.assertTrue(record["_pushed"])
+        self.assertEqual(ledger["row_count"], 1)
+
+    def test_fetch_failure_never_degrades_to_an_empty_ledger(self):
+        real = FakeFeishu()
+
+        def broken(request, timeout=None):
+            if request.full_url.split("?")[0].endswith("/records/search"):
+                raise TimeoutError()
+            return real(request, timeout)
+
+        client, _ = fake_feishu.client(transport=broken)
+        with self.assertRaises(LedgerError):
+            fetch_ledger(client)
+
+
+class PayloadToTableTests(unittest.TestCase):
+    """16 字段载荷到多维表格列的映射；空值不再写成字符串 null。"""
+
+    def payload(self, **overrides):
+        payload = {field: "null" for field in FIELDS}
+        payload.update({"标题": "甲医院过敏原试剂采购公告", "链接": "https://example.org/a",
+                        "单位": "甲医院", "命中关键词": "过敏原", "所属省/市": "安徽",
+                        "地区": "安徽省亳州市", "所属大区": "华中大区", "采购方式": "公开招标",
+                        "科室": "检验科", "内容（检索的摘要）": "采购过敏原试剂"})
+        payload.update(overrides)
+        return payload
+
+    def fields(self, **overrides):
+        return build_fields(self.payload(**overrides), fake_feishu.SCHEMA, now_ms=1700000000000)
+
+    def test_null_values_are_omitted_not_written(self):
+        fields, _ = self.fields()
+        self.assertNotIn("项目编号", fields)
+        self.assertNotIn("医院等级", fields)
+        self.assertNotIn("null", list(fields.values()))
+
+    def test_payload_names_are_mapped_to_table_columns(self):
+        fields, _ = self.fields()
+        self.assertEqual(fields["科室名称"], "检验科")
+        self.assertEqual(fields["关键词命中"], "过敏原")
+        self.assertEqual(fields["内容"], "采购过敏原试剂")
+        self.assertNotIn("科室", fields)
+
+    def test_url_checkbox_and_datetime_take_their_own_shapes(self):
+        fields, _ = self.fields()
+        self.assertEqual(fields["链接"], {"link": "https://example.org/a",
+                                          "text": "https://example.org/a"})
+        self.assertIs(fields["是否已推送"], True)
+        self.assertEqual(fields["插入表格的时间"], 1700000000000)
+
+    def test_automation_side_columns_are_filled_by_the_sender(self):
+        fields, _ = self.fields()
+        self.assertEqual(fields["标讯来源"], "AI收集")
+        self.assertEqual(fields["标讯状态"], "新推送")
+
+    def test_unknown_single_select_option_is_dropped_with_a_trace(self):
+        fields, dropped = self.fields(采购方式="比选")
+        self.assertNotIn("采购方式", fields)
+        self.assertTrue(any(d["字段"] == "采购方式" and d["值"] == "比选" for d in dropped))
 
 
 class DeliveryContractTests(unittest.TestCase):
+    """发送门禁：台账在飞书，每次发送前重新拉取并重新查重。"""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.seen = self.root / "seen.json"
-        save_ledger(self.seen, {"records": []})
-        self.calls = 0
+        self.fake = FakeFeishu()
+        self.client = fake_feishu.client(transport=self.fake)[0]
 
-    def setup_run(self, name="run", url="https://example.org/a"):
+    def setup_run(self, name="run", url="https://example.org/a", ledger_rows=()):
         run = self.root / name
         candidate = {"title": "甲医院过敏原试剂采购公告", "url": url, "publish_time": "2026-09-04",
                      "content": "采购过敏原试剂", "source_fields": {"单位": "甲医院"}, "bid_id": "123"}
         index = write_candidates([candidate], run, "2026-09-04")
-        pipeline, manifest = prepare(run, self.seen, 10, "daily-push")
+        snapshot_client = fake_feishu.client(list(ledger_rows))[0]
+        save_snapshot(snapshot_path(run), fetch_ledger(snapshot_client))
+        pipeline, manifest = prepare(run, 10, "daily-push")
         cid = index[0]["candidate_id"]
         payload = {k: "null" for k in FIELDS}
         payload.update(row(url=url))
@@ -162,29 +232,35 @@ class DeliveryContractTests(unittest.TestCase):
                          "decision_counts": {"create": 1},
                          "payloads": [{"flow": "push", "candidate_id": cid,
                                        "path": str(payload_path), "sha256": sha256_bytes(body)}]})
-        (pipeline / "manifest.json").write_text(json.dumps(manifest))
+        (pipeline / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False),
+                                                encoding="utf-8")
         return manifest, cid, payload_path, body
 
-    def transport(self, *args, **kwargs):
-        self.calls += 1
-        return Response()
-
     def send(self, run):
-        return send_once(*run, "https://unused.invalid", transport=self.transport)
+        return send_once(*run, client=self.client)
 
-    def test_repeat_before_record_push_makes_one_post(self):
+    def test_repeat_before_record_push_writes_one_row(self):
         run = self.setup_run()
         first, second = self.send(run), self.send(run)
         self.assertTrue(first["sent"])
         self.assertTrue(second["already_seen"])
-        self.assertEqual(self.calls, 1)
-        self.assertEqual(len(read_ledger(self.seen)["records"]), 1)
+        self.assertEqual(len(self.fake.created), 1)
 
-    def test_two_prepared_runs_cannot_both_send(self):
-        a, b = self.setup_run("a"), self.setup_run("b", "https://x.org/mirror")
+    def test_success_hinges_on_record_id_not_on_the_auto_number(self):
+        # 新增记录的响应不含自动编号；成功判定只能看 record_id，回执照样能登记。
+        run = self.setup_run()
+        result = self.send(run)
+        self.assertTrue(result["feishu_record_id"])
+        self.assertEqual(result["feishu_id"], "")
+        state = record_push(self.root / "run", result["receipt"])
+        self.assertEqual(state["push_counts"]["confirmed"], 1)
+
+    def test_two_prepared_runs_cannot_both_write(self):
+        a = self.setup_run("a")
+        b = self.setup_run("b", "https://x.org/mirror")
         self.send(a)
         second = self.send(b)
-        self.assertEqual(self.calls, 1)
+        self.assertEqual(len(self.fake.created), 1)
         self.assertTrue(second["already_seen"])
         state = record_push(self.root / "b", second["receipt"])
         self.assertEqual(state["state"], "PUSHED")
@@ -196,84 +272,67 @@ class DeliveryContractTests(unittest.TestCase):
         record_push(self.root / "run", result["receipt"])
         repeat = record_push(self.root / "run", result["receipt"])
         self.assertTrue(repeat["idempotent"])
-        self.assertEqual(len(read_ledger(self.seen)["records"]), 1)
+        self.assertEqual(len(self.fake.created), 1)
 
-    def test_timeout_does_not_auto_retry(self):
+    def test_row_added_by_someone_else_between_prepare_and_send_blocks_the_write(self):
         run = self.setup_run()
-        with self.assertRaises(SendError):
-            send_once(*run, "https://unused.invalid", transport=lambda *a, **k: (_ for _ in ()).throw(TimeoutError()))
+        # prepare 之后别人手工加了同一条：发送前重新拉取必须看见它。
+        self.fake.rows.append(ledger_row(链接="https://example.org/a", 编号="ZB-MANUAL"))
+        result = self.send(run)
+        self.assertTrue(result["already_seen"])
+        self.assertEqual(len(self.fake.created), 0)
+
+    def test_unknown_write_result_is_verified_by_lookup_not_by_retrying(self):
+        run = self.setup_run()
+        self.fake.create_error = TimeoutError()
+        self.fake.create_lands_anyway = True
+        result = self.send(run)
+        # 回查确认行已落库：算成功，且没有第二次写入。
+        self.assertTrue(result["sent"])
+        self.assertEqual(len(self.fake.created), 1)
+
+    def test_unknown_write_result_that_did_not_land_stops_without_retrying(self):
+        run = self.setup_run()
+        self.fake.create_error = TimeoutError()
         with self.assertRaises(SendError):
             self.send(run)
-        self.assertEqual(self.calls, 0)
-        self.assertEqual(len(read_ledger(self.seen)["records"]), 0)
-
-    def test_confirmed_not_delivered_can_be_retried(self):
-        run = self.setup_run()
-        with self.assertRaises(SendError):
-            send_once(*run, "https://unused.invalid", transport=lambda *a, **k: (_ for _ in ()).throw(TimeoutError()))
-        attempt = next(iter(read_ledger(self.seen)["deliveries"]))
-        resolve_delivery(self.seen, attempt, "not-delivered", "测试：已核对飞书中无此记录")
+        self.assertEqual(len(self.fake.created), 0)
+        # 行确实没落库，下一次发送才允许真正写入，且只写一行。
+        self.fake.create_error = None
         self.assertTrue(self.send(run)["sent"])
-        self.assertEqual(self.calls, 1)
+        self.assertEqual(len(self.fake.created), 1)
 
-    def test_crash_after_receipt_recovers_without_second_post(self):
+    def test_another_process_cannot_hold_the_same_snapshot_lock(self):
         run = self.setup_run()
-        real_save = save_ledger
-        writes = []
-        def fail_second(path, data):
-            writes.append(1)
-            if len(writes) == 2:
-                raise OSError("simulated disk failure after receipt")
-            real_save(path, data)
-        with patch("send_webhook.save_ledger", side_effect=fail_second), self.assertRaises(OSError):
-            self.send(run)
-        self.assertTrue(self.send(run)["already_seen"])
-        self.assertEqual(self.calls, 1)
-
-    def test_another_process_cannot_hold_the_same_ledger_lock(self):
-        code = "from tender_ledger import ledger_lock; import sys\nwith ledger_lock(sys.argv[1]): print('ACQUIRED')"
-        with ledger_lock(self.seen):
-            result = subprocess.run([sys.executable, "-c", code, str(self.seen)],
-                                    env={"PYTHONPATH": str(ROOT / "scripts")}, capture_output=True, text=True)
+        path = Path(run[0]["ledger_snapshot"])
+        code = ("from tender_ledger import ledger_lock; import sys\n"
+                "with ledger_lock(sys.argv[1]): print('ACQUIRED')")
+        with ledger_lock(path):
+            # 子进程的报错在简中 Windows 上是 GBK；显式指定解码，别按 locale 猜。
+            result = subprocess.run([sys.executable, "-c", code, str(path)],
+                                    env={"PYTHONPATH": str(ROOT / "scripts")},
+                                    capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace")
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("ACQUIRED", result.stdout)
 
-    def test_old_history_is_not_pruned_when_new_record_is_confirmed(self):
-        save_ledger(self.seen, {"records": [row(title="乙医院过敏原试剂采购公告", buyer="乙医院",
-                                              url="https://x.org/old", day="2020-01-01", _pushed=True)]})
-        self.send(self.setup_run())
-        self.assertEqual(len(read_ledger(self.seen)["records"]), 2)
-
-    def test_possible_duplicate_is_not_sent(self):
-        run = self.setup_run()
-        save_ledger(self.seen, {"records": [row(title="甲医院过敏原试剂采购公告", buyer="",
-                                              url="https://x.org/old", _pushed=True)]})
-        # 短标题且缺采购人，不足以确定跨链接是同一医院，应阻止直接发送。
+    def test_semantic_suspect_is_not_sent(self):
+        # 台账缺采购人、链接也不同：字符级相似但证据不足，发送门禁必须扣下。
+        old = ledger_row(链接="https://x.org/old", 单位="", 编号="ZB-OLD")
+        run = self.setup_run(ledger_rows=[old])
+        self.fake.rows.append(old)
         with self.assertRaises(SendError):
             self.send(run)
-        self.assertEqual(self.calls, 0)
-
-    def test_review_resolution_unblocks_the_send_gate(self):
-        run = self.setup_run()
-        save_ledger(self.seen, {"records": [row(title="甲医院过敏原试剂采购公告", buyer="",
-                                              url="https://x.org/old", _pushed=True)]})
-        with self.assertRaises(SendError):
-            self.send(run)
-        resolve_review(self.seen, row(), "new", "测试：已核对飞书中无此条")
-        self.assertTrue(self.send(run)["sent"])
-        self.assertEqual(self.calls, 1)
+        self.assertEqual(len(self.fake.created), 0)
 
 
-class ReviewResolutionTests(unittest.TestCase):
-    """疑似重复必须有出口：核对飞书后能放行，也能永久判定为重复。"""
+class SemanticReviewTests(unittest.TestCase):
+    """语义判定出口：模型定案后才放行或判重，结论落在本次运行里。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.seen = self.root / "seen.json"
-        # 旧台账没存采购人，候选换了来源链接：两边都不足以判定，只能留待人工核对。
-        save_ledger(self.seen, {"records": [row(buyer="", _pushed=True)]})
         self.run = self.root / "run"
         index = write_candidates([{
             "title": "甲医院过敏原试剂采购公告", "url": "https://x.org/new",
@@ -281,47 +340,54 @@ class ReviewResolutionTests(unittest.TestCase):
             "source_fields": {"单位": "甲医院"}, "bid_id": "123",
         }], self.run, "2026-09-04")
         self.cid = index[0]["candidate_id"]
+        # 台账没存采购人，候选换了来源链接：两边都不足以判定，只能交给语义比对。
+        client, _ = fake_feishu.client([ledger_row(链接="https://x.org/old", 单位="",
+                                                   编号="ZB-OLD")])
+        save_snapshot(snapshot_path(self.run), fetch_ledger(client))
 
     def counts(self, force=False):
-        return prepare(self.run, self.seen, 10, "daily-push", force)[1]["counts"]
+        return prepare(self.run, 10, "daily-push", force)[1]["counts"]
+
+    def pair_id(self):
+        text = (self.run / "pipeline" / "semantic_review.jsonl").read_text(encoding="utf-8")
+        return json.loads(text.splitlines()[0])["台账候选"][0]["pair_id"]
+
+    def decide(self, same, note="测试依据"):
+        path = self.root / "decisions.json"
+        path.write_text(json.dumps([{"pair_id": self.pair_id(), "same": same, "note": note}],
+                                   ensure_ascii=False), encoding="utf-8")
+        return resolve_semantic(self.run, path)
 
     def test_suspect_is_held_out_of_the_queue(self):
         counts = self.counts()
-        self.assertEqual(counts["dedup_review"], 1)
+        self.assertEqual(counts["semantic_review"], 1)
         self.assertEqual(counts["queued"], 0)
 
-    def test_confirmed_new_notice_reaches_the_queue(self):
+    def test_model_says_different_and_the_notice_reaches_the_queue(self):
         self.counts()
-        result = resolve_review_item(self.run, self.cid, "new", "测试：已核对飞书中无此条")
-        self.assertIn("prepare", result["next_action"])
+        self.assertIn("prepare", self.decide(False)["next_action"])
         counts = self.counts(force=True)
         self.assertEqual(counts["queued"], 1)
-        self.assertEqual(counts["dedup_review"], 0)
+        self.assertEqual(counts["semantic_review"], 0)
 
-    def test_confirmed_duplicate_stops_recurring(self):
+    def test_model_says_same_and_the_notice_stops_recurring(self):
         self.counts()
-        resolve_review_item(self.run, self.cid, "duplicate", "测试：飞书已有该记录")
+        self.decide(True)
         counts = self.counts(force=True)
         self.assertEqual(counts["already_seen"], 1)
-        self.assertEqual(counts["dedup_review"], 0)
+        self.assertEqual(counts["semantic_review"], 0)
         self.assertEqual(counts["queued"], 0)
 
-    def test_resolution_requires_a_stated_basis(self):
+    def test_decisions_require_a_stated_basis_and_a_boolean(self):
         self.counts()
-        for outcome, note in (("new", "   "), ("duplicate", ""), ("既非", "测试")):
-            with self.assertRaises(LedgerError):
-                resolve_review_item(self.run, self.cid, outcome, note)
-        self.assertEqual(self.counts(force=True)["dedup_review"], 1)
-
-    def test_unknown_candidate_is_rejected(self):
-        self.counts()
-        with self.assertRaises(PipelineError):
-            resolve_review_item(self.run, "no-such-candidate", "new", "测试")
-
-    def test_strong_duplicate_cannot_be_declared_new(self):
-        save_ledger(self.seen, {"records": [row(_pushed=True)]})
-        with self.assertRaises(LedgerError):
-            resolve_review(self.seen, row(), "new", "测试：不应放行强身份重复")
+        path = self.root / "bad.json"
+        for value in ({"pair_id": self.pair_id(), "same": True, "note": "  "},
+                      {"pair_id": self.pair_id(), "note": "有依据"},
+                      {"pair_id": "不存在~ZB-OLD", "same": True, "note": "有依据"}):
+            path.write_text(json.dumps([value], ensure_ascii=False), encoding="utf-8")
+            with self.assertRaises(PipelineError):
+                resolve_semantic(self.run, path)
+        self.assertEqual(self.counts(force=True)["semantic_review"], 1)
 
 
 if __name__ == "__main__":

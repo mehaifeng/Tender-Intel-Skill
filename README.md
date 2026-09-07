@@ -1,18 +1,19 @@
 # IVD Bid Radar Skill
 
-面向过敏原、自身免疫IVD试剂和免疫分析仪器采购情报的无人值守管线：默认检索最近72小时，完成去重、快速品类核验、医院库匹配和固定16字段Webhook推送。
+面向过敏原、自身免疫IVD试剂和免疫分析仪器采购情报的无人值守管线：默认检索最近72小时，完成去重、快速品类核验、医院库匹配和固定16字段写入飞书多维表格。
 
 ## 处理流程
 
 ```text
-知了标讯检索（search_bids 自适应分批 + get_bid_detail 取正文与回源链接）
-  → 统一候选契约与查重（同一公告的壳记录让位于完整正文记录）
+拉取飞书多维表格台账快照（唯一防重真相源）
+  → 知了标讯检索（search_bids 自适应分批 + get_bid_detail 取正文与回源链接）
+  → 统一候选契约与查重（强身份 → 标题字符级 → 正文 → 语义，逐层收口）
   → 标题与内容信号预筛
   → 结构化字段直接绑定，每批10条只做产品域判断
   → 全国医院库确定性匹配
   → 固定16字段校验
   → DryRun
-  → Webhook推送与成功回执登记
+  → 发送前重新拉台账再查重 → 飞书接口写入与成功回执登记
 ```
 
 ## 关键文件
@@ -29,19 +30,20 @@
 | `scripts/search_common.py` | 统一候选契约、链接规范化与查重 |
 | `scripts/tender_pipeline.py` | 去重、预筛、批次、字段校验和回执登记 |
 | `scripts/tender_identity.py` | 全流程共用公告身份规则 |
-| `scripts/tender_ledger.py` | 长期台账锁与未知发送结果登记 |
-| `scripts/import_feishu_ledger.py` | 飞书 XLSX 台账增量导入 |
+| `scripts/tender_ledger.py` | 飞书台账拉取、运行快照与快照锁 |
+| `scripts/feishu_client.py` | 飞书多维表格开放接口客户端 |
+| `scripts/dedup_match.py` | 分层查重漏斗：强身份 / 字符级 / 正文 / 语义 |
 | `references/dedup.md` | 去重设计、发送防重与升级约定 |
 | `scripts/hospital_match.py` | 医院名称、别名、等级的本地确定性匹配 |
-| `scripts/send_webhook.py` | 主用Webhook DryRun和生产发送门禁 |
-| `scripts/send_webhook.ps1` | Windows兼容发送入口 |
+| `scripts/send_record.py` | 载荷 DryRun 与生产写入门禁 |
+| `scripts/send_record.ps1` | Windows兼容发送入口 |
 | `data/hospitals.min.json.gz` | 50,599家医疗单位精简运行索引 |
 
 ## 配置
 
-开箱包已经包含本地`config/webhook.json`，可以直接运行。该文件含凭据，已被Git忽略，请勿公开分享。
+开箱包已经包含本地`config/feishu_app.json`，可以直接运行。该文件含凭据，已被Git忽略，请勿公开分享。
 
-知了标讯 API Key 按环境变量`ZLBX_API_KEY` → `config/zlbx.json`的`api_key`顺序读取，模板见`config/zlbx.example.json`；该文件含凭据，已被Git忽略。Key没有到期机制，不需要定期换发。检索按调用次数计费，72h日窗一轮约27积分（列表）加通过预筛的候选每条1积分（详情），约¥132/月，实测明细见`references/zlbx.md`。适配器把每词命中数记在`data/query_hits.json`用于装箱降低调用次数，首次运行没有该文件时会多花约一倍列表调用。Webhook按环境变量`FEISHU_WEBHOOK_URL` → 旧环境变量`FEISHU_CREATE_WEBHOOK_URL` → `config/webhook.json`的顺序读取。
+知了标讯 API Key 按环境变量`ZLBX_API_KEY` → `config/zlbx.json`的`api_key`顺序读取，模板见`config/zlbx.example.json`；该文件含凭据，已被Git忽略。Key没有到期机制，不需要定期换发。检索按调用次数计费，72h日窗一轮约27积分（列表）加通过预筛的候选每条1积分（详情），约¥132/月，实测明细见`references/zlbx.md`。适配器把每词命中数记在`data/query_hits.json`用于装箱降低调用次数，首次运行没有该文件时会多花约一倍列表调用。飞书自建应用凭据与目标多维表格按环境变量`FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_APP_TOKEN`/`FEISHU_TABLE_ID` → `config/feishu_app.json`的顺序读取，模板见`config/feishu_app.example.json`。应用需开通`bitable:app`，并在目标多维表格里通过「添加文档应用」加为协作者。
 
 ## 运行
 
@@ -78,12 +80,12 @@ python scripts/tender_pipeline.py submit-batch \
 校验并推送单条载荷：
 
 ```bash
-python scripts/send_webhook.py --payload <payload.json> --dry-run
-python scripts/send_webhook.py --payload <payload.json> --live --manifest <manifest.json>
+python scripts/send_record.py --payload <payload.json> --dry-run
+python scripts/send_record.py --payload <payload.json> --live --manifest <manifest.json>
 python scripts/tender_pipeline.py record-push --run-dir <检索目录> --receipt <成功回执>
 ```
 
-## 固定Webhook字段
+## 固定推送字段
 
 字段严格为：
 
@@ -92,7 +94,7 @@ python scripts/tender_pipeline.py record-push --run-dir <检索目录> --receipt
 采购方式、科室、命中关键词、内容（检索的摘要）、链接、医院全名、医院等级
 ```
 
-所有字段都是字符串；缺失统一填`"null"`。详细示例见`references/schema.md`。
+所有字段都是字符串；缺失统一填`"null"`。写入多维表格时`"null"`的字段直接不传，单元格保持真正的空。详细示例见`references/schema.md`。
 
 `所属省/市`只输出省级行政区或直辖市简称，例如`北京`、`河北`、`上海`、`湖南`、`新疆`、`广西`、`青海`，不输出地级市或`省/市`组合。
 
@@ -106,7 +108,7 @@ python scripts/tender_pipeline.py record-push --run-dir <检索目录> --receipt
     python3 scripts/build_package.py --no-secrets # 不含凭据，可外发
 
 输出到 `dist/`（已被 Git 忽略）。打包时会在包内跑 `--dry-run` 与全量测试自检，
-不通过就以非零码退出。含凭据的包里 `config/zlbx.json`、`config/webhook.json`
+不通过就以非零码退出。含凭据的包里 `config/zlbx.json`、`config/feishu_app.json`
 是明文，**不要提交版本库、不要转发**。
 
 包里带上了 `data/query_hits.json`，所以部署后第一次运行就是热态（列表约 27 次调用），
@@ -115,15 +117,16 @@ python scripts/tender_pipeline.py record-push --run-dir <检索目录> --receipt
 ## 依赖
 
 - Python 3.9+标准库；正常运行不需要Python第三方包
-- Windows旧任务如继续使用`scripts/send_webhook.ps1`，需要PowerShell 5.1+或PowerShell 7+
+- Windows旧任务如继续使用`scripts/send_record.ps1`，需要PowerShell 5.1+或PowerShell 7+
 - 医院运行索引已经内置，不需要在日常任务中读取原始15MB工作簿
 
 ## 去重与部署约定
 
-飞书全量台账已作为防重基线导入，台账长期保留。列表阶段能确认已入账的结果直接跳过详情，
-发送前再检查最新台账；发送成功立即入账，重跑无需等待 record-push 才能防重。
-未知发送结果停止自动重发，核对后登记。判不了是否重复的候选扣在`pipeline/dedup_review.jsonl`，
-核对飞书后用`tender_pipeline.py resolve-review`登记为重复或新公告。详见 [去重与发送登记](references/dedup.md)。
+长期台账就是飞书多维表格本身，本地没有去重库。每次检索开头拉一份快照写进运行目录，
+列表阶段据此跳过已入账公告的详情调用；发送前再拉一次最新的重新查重。拉不到台账整轮停下，
+绝不按空台账继续。写入结果未知时按链接回查确认，回查不到就停且不重试。
+前三层定不了案的候选扣在`pipeline/semantic_review.jsonl`，语义判定后用
+`tender_pipeline.py resolve-semantic`登记结论。详见 [去重与发送登记](references/dedup.md)。
 
-只在 dist 生成分发包，不安装新技能。升级时保留已有生产部署的最新 data/seen.json，
-不可用包内快照覆盖；用最新飞书导出表增量导入。所有生产任务共用同一台账。
+只在 dist 生成分发包，不安装新技能。升级不再需要保留或合并任何本地台账。
+别人手工加进多维表格的行同样进入防重，不再依赖人工导出。

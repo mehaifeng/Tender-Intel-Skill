@@ -11,7 +11,7 @@
 2. `config/zlbx.json` 的 `{"api_key": "..."}`。
 
 两者都没有则报错退出（退出码 3）。**命令行不接受明文 Key**——避免进入进程列表和
-shell 历史。`config/zlbx.json` 与 `config/webhook.json` 同等对待：在 `.gitignore` 中，
+shell 历史。`config/zlbx.json` 与 `config/feishu_app.json` 同等对待：在 `.gitignore` 中，
 权限 `0600`，禁止提交、外发，也不得进候选目录、日志或 Webhook 载荷。摘要里只留
 前 9 位（`mask_key()`）。模板见 `config/zlbx.example.json`。
 

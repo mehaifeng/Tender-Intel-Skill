@@ -39,16 +39,16 @@ FILES = [
     "scripts/tender_pipeline.py",
     "scripts/search_common.py",
     "scripts/hospital_match.py",
-    "scripts/send_webhook.py",
-    "scripts/send_webhook.ps1",
+    "scripts/send_record.py",
+    "scripts/send_record.ps1",
     "scripts/tender_identity.py",
     "scripts/tender_ledger.py",
-    "scripts/import_feishu_ledger.py",
+    "scripts/feishu_client.py",
+    "scripts/dedup_match.py",
     "config/zlbx.example.json",
-    "config/webhook.example.json",
-    # 医院索引与台账：没有它们跑不出医院全名/等级，也会重复推送历史公告。
+    "config/feishu_app.example.json",
+    # 医院索引：没有它跑不出医院全名与等级。台账不再随包分发，运行时从飞书拉。
     "data/hospitals.min.json.gz",
-    "data/seen.json",
     "data/query_stats.json",
     # 每词命中数：带上它，首次运行就是热态 27 次调用而不是冷启动的 50 次。
     "data/query_hits.json",
@@ -62,9 +62,10 @@ TEST_FILES = [
     "tests/test_notice_stage.py",
     "tests/test_webhook_schema.py",
     "tests/test_dedup_contract.py",
-    "tests/test_ledger_import.py",
+    "tests/test_dedup_match.py",
+    "tests/fake_feishu.py",
 ]
-SECRET_FILES = ["config/zlbx.json", "config/webhook.json"]
+SECRET_FILES = ["config/zlbx.json", "config/feishu_app.json"]
 
 QUICKSTART = """# 快速开始
 
@@ -74,11 +75,11 @@ QUICKSTART = """# 快速开始
 
 解压后整个 `ivd-bid-radar/` 目录放进你的技能目录，例如 `~/.hermes/skills/`。
 
-**凭据已在包内**（`config/zlbx.json` 知了 API Key、`config/webhook.json` 飞书地址），
-不需要再配环境变量。两个文件权限应为 `0600`；Windows 或部分解压工具不保留权限位，
-在 macOS/Linux 上解压后确认一次：
+**凭据已在包内**（`config/zlbx.json` 知了 API Key、`config/feishu_app.json` 飞书自建
+应用凭据与目标多维表格），不需要再配环境变量。两个文件权限应为 `0600`；Windows 或部分
+解压工具不保留权限位，在 macOS/Linux 上解压后确认一次：
 
-    chmod 600 config/zlbx.json config/webhook.json
+    chmod 600 config/zlbx.json config/feishu_app.json
 
 **这个包含明文凭据，不要提交版本库、不要转发。**
 
@@ -96,13 +97,12 @@ QUICKSTART = """# 快速开始
 之后按 `SKILL.md` 走核实、提交批次、DryRun、推送、登记回执。
 默认窗口 72 小时；`--time-range 24h` 或 `YYYY-MM-DD..YYYY-MM-DD` 可改。
 
-`data/seen.json` 是长期共享台账，不能删除、按日期裁剪或用旧包覆盖。
-首次部署可用包内已导入的飞书台账；升级时保留运行目录的 seen.json（含发送占位），
-用 import_feishu_ledger.py --xlsx <最新飞书导出.xlsx> --apply 增量更新。
-同机多任务必须指向同一份台账。跨机器独立台账不能防止同时发送。
-发送结果未知时停止重发，按 references/dedup.md 核对，不要直接重跑绕过。
-判不了是否重复的候选扣在 pipeline/dedup_review.jsonl，核对飞书后用
-tender_pipeline.py resolve-review 登记为 duplicate 或 new，同样不要绕过。
+长期台账就是飞书多维表格本身，本地不再保存去重库，升级时也没有台账要保留或合并。
+每次检索开头拉一份快照写进运行目录（`ledger_snapshot.json`），发送前再拉一次最新的
+重新查重。拉不到台账时整轮停下，绝不按空台账继续。
+判不了是否重复的候选扣在 pipeline/semantic_review.jsonl，模型判定后用
+tender_pipeline.py resolve-semantic 登记结论，不要绕过。
+写入结果未知时不会自动重发；下一轮拉取台账会自然消解，手工重发才会造成重复行。
 
 ## 4. 花多少钱
 
@@ -157,6 +157,9 @@ def verify(package_dir, include_tests):
     completed = subprocess.run(
         [sys.executable, "scripts/tender_search.py", "--dry-run"],
         cwd=package_dir, capture_output=True, text=True,
+        # 子进程按 UTF-8 吐中文；不写死就走 locale（简中 Windows 是 cp936），
+        # 解码线程会炸掉，stdout 变成 None，自检结论看不出真因。
+        encoding="utf-8", errors="replace",
     )
     ok = completed.returncode == 0 and '"query_count"' in completed.stdout
     checks.append(("tender_search --dry-run", ok, completed.stderr.strip()[:200]))
@@ -165,6 +168,7 @@ def verify(package_dir, include_tests):
         completed = subprocess.run(
             [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
             cwd=package_dir, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
         )
         tail = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else ""
         checks.append(("unittest discover", completed.returncode == 0, tail))

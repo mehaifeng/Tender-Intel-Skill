@@ -1,12 +1,22 @@
-# 当前约定（2026-09-06）
+# 当前约定（2026-09-07）
 
 - 用户要求移除本机旧 tender-intel，已执行；不安装新技能，只在 dist 发布。
 - 保留列表 title/sm_names 预筛，不扩大详情获取范围。
-- 去重统一使用 tender_identity.py；飞书导出 387 行已增量导入，保留本地历史后共496行。
-- seen.json 长期保留；同机生产任务共用台账，升级不能用包内快照覆盖运行台账。
-- send_webhook.py 在请求前持久化占位，成功后立即入账，未知结果不自动重发。
-- 判不了的疑似重复扣在 dedup_review.jsonl，出口只有 resolve-review；不要手工改 seen.json。
-- Windows 入口转调 Python。详细规则、导入与恢复命令见 references/dedup.md。
+- **本地已无去重库**：`data/seen.json` 与 `import_feishu_ledger.py` 已删除。长期台账就是
+  飞书多维表格，经开放接口读写；检索开头拉一份快照到 `<检索目录>/ledger_snapshot.json`，
+  发送前再拉一次最新的重新查重。拉不到台账整轮停下，绝不按空台账继续。
+- 去重是分层漏斗（`scripts/dedup_match.py`）：L1 强身份 → L1 后续阶段 → L2 标题字符级 →
+  L3 正文 → L4 语义。前四层零模型，只有窄带配对写进 `pipeline/semantic_review.jsonl`
+  交模型判定，出口是 `tender_pipeline.py resolve-semantic`。检索适配器、prepare、发送门禁
+  调用同一个漏斗。身份规则本身仍统一在 tender_identity.py。
+- 2026-09-07 业务方定的口径：同一招标已推给销售后，它的更正/变更/澄清不再推（窗口 90 天，
+  轮次与包号必须一致）。二次/重新招标与不同包号仍是新机会，照推。台账里没有原招标时，
+  更正公告照推——实测 12 条更正只有 2 条能找到原招标。
+- 推送改用飞书接口直写（`scripts/send_record.py`，替代 send_webhook.py 与自动化 Webhook）。
+  16 字段契约不变，但值为 `null` 的字段不再写进表。原自动化流程补的 `标讯来源=AI收集`、
+  `标讯状态=新推送`、`是否已推送`、两个时间戳，改由发送器自己写。
+- 写入结果未知时按链接回查确认，回查不到就停且不重试；不再有本地发送占位与 resolve-delivery。
+- Windows 入口转调 Python。详细规则见 references/dedup.md。
 
 以下为改造前历史背景；与上述当前约定冲突时以当前约定及 dedup.md 为准。
 
