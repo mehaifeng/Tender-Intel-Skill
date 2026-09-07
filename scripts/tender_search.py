@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tender Intel 可插拔检索层：运行来源适配器并生成统一候选目录。"""
+"""IVD Bid Radar 检索层：运行知了标讯适配器并生成统一候选目录。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 from search_common import merge_source_dirs, write_candidates
@@ -18,82 +18,27 @@ from search_common import merge_source_dirs, write_candidates
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 
+# 凭证类失败必须与“今天没有新公告”区分开：适配器用 3 表示 API Key 缺失、被拒或积分不足。
+AUTH_ERROR_EXIT_CODE = 3
 
-def _doubao_command(args, source_dir):
+
+def build_command(args, source_dir):
     command = [
-        sys.executable, str(SCRIPTS / "doubao_search.py"),
+        sys.executable, str(SCRIPTS / "zlbx_search.py"),
         "--time-range", args.time_range,
         "--out-dir", str(source_dir),
+        "--batch-size", str(args.batch_size),
+        "--page-size", str(args.page_size),
+        "--max-details", str(args.max_details),
+        "--delay", str(args.delay),
     ]
-    if args.doubao_queries:
-        command.extend(["--queries", args.doubao_queries])
-    if args.no_stats:
-        command.append("--no-stats")
+    if args.queries:
+        command.extend(["--queries", args.queries])
+    if getattr(args, "seen", None):
+        command.extend(["--seen", args.seen])
     if args.dry_run:
         command.append("--dry-run")
     return command
-
-
-def _ccgp_command(args, source_dir):
-    command = [
-        sys.executable, str(SCRIPTS / "ccgp_search.py"),
-        "--time-range", args.time_range,
-        "--out-dir", str(source_dir),
-        "--delay", str(args.ccgp_delay),
-        "--max-pages-per-query", str(args.ccgp_max_pages),
-    ]
-    if args.ccgp_queries:
-        command.extend(["--queries", args.ccgp_queries])
-    if args.dry_run:
-        command.append("--dry-run")
-    return command
-
-
-def _plap_command(args, source_dir):
-    command = [
-        sys.executable, str(SCRIPTS / "plap_search.py"),
-        "--time-range", args.time_range,
-        "--out-dir", str(source_dir),
-        "--strategy", args.plap_strategy,
-        "--delay", str(args.plap_delay),
-        "--page-size", str(args.plap_page_size),
-        "--max-pages-per-task", str(args.plap_max_pages),
-    ]
-    if args.plap_queries:
-        command.extend(["--queries", args.plap_queries])
-    if args.dry_run:
-        command.append("--dry-run")
-    return command
-
-
-# 新来源只需实现同一候选目录契约并在这里注册命令构造器。
-ADAPTERS = {
-    "doubao": _doubao_command,
-    "ccgp": _ccgp_command,
-    "plap": _plap_command,
-}
-DEFAULT_SOURCES = ",".join(ADAPTERS)
-
-
-def parse_sources(value):
-    names = []
-    for name in str(value or "").split(","):
-        name = name.strip().lower()
-        if name and name not in names:
-            names.append(name)
-    unknown = [name for name in names if name not in ADAPTERS]
-    if unknown:
-        raise ValueError(f"未知检索来源：{unknown}；可用来源：{sorted(ADAPTERS)}")
-    if not names:
-        raise ValueError("至少启用一个检索来源")
-    return names
-
-
-def load_summary(source_dir):
-    path = Path(source_dir) / "search_summary.json"
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def main():
@@ -101,105 +46,103 @@ def main():
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(description="Tender Intel 可插拔多来源检索层")
-    parser.add_argument(
-        "--sources",
-        default=DEFAULT_SOURCES,
-        help=f"逗号分隔；默认启用全部已注册适配器：{DEFAULT_SOURCES}",
-    )
+    parser = argparse.ArgumentParser(description="IVD Bid Radar 检索层（知了标讯）")
     parser.add_argument("--time-range", default="72h", help="72h / 3d / YYYY-MM-DD..YYYY-MM-DD")
     parser.add_argument("--out-dir", help="统一候选目录；默认 .tmp/search/<日期>")
-    parser.add_argument("--doubao-queries", help="传给豆包适配器的编号表达式")
-    parser.add_argument("--ccgp-queries", help="传给 CCGP 的逗号分隔单词 Query")
-    parser.add_argument("--ccgp-delay", type=float, default=2.0)
-    parser.add_argument("--ccgp-max-pages", type=int, default=100)
-    parser.add_argument("--plap-queries", help="传给 PLAP 的逗号分隔标题 Query")
-    parser.add_argument("--plap-strategy", choices=("hybrid", "title", "enumerate"), default="hybrid")
-    parser.add_argument("--plap-delay", type=float, default=1.0)
-    parser.add_argument("--plap-page-size", type=int, default=20)
-    parser.add_argument("--plap-max-pages", type=int, default=100)
-    parser.add_argument("--no-stats", action="store_true", help="不更新豆包 query_stats")
+    parser.add_argument("--queries", help="逗号分隔 Query；默认读 references/keywords.md")
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--page-size", type=int, default=50)
+    parser.add_argument("--max-details", type=int, default=60)
+    parser.add_argument("--delay", type=float, default=0.25)
+    parser.add_argument("--seen", default=str(ROOT / "data/seen.json"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    try:
-        sources = parse_sources(args.sources)
-    except ValueError as exc:
-        print(f"错误：{exc}", file=sys.stderr)
-        return 2
-
     out_dir = Path(args.out_dir) if args.out_dir else ROOT / ".tmp" / "search" / date.today().isoformat()
-    stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
-    source_root = out_dir / ".sources"
-    adapter_env = os.environ.copy()
-    adapter_env["PYTHONIOENCODING"] = "utf-8"
-    runs = []
-    usable_dirs = []
-    for source in sources:
-        source_dir = source_root / f"{source}-{stamp}"
-        source_dir.mkdir(parents=True, exist_ok=True)
-        command = ADAPTERS[source](args, source_dir)
-        print(f"运行检索来源：{source}", flush=True)
-        completed = subprocess.run(
-            command,
-            cwd=ROOT,
-            env=adapter_env,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
+    source_dir = out_dir / ".sources" / "zlbx"
+    source_dir.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    completed = subprocess.run(
+        build_command(args, source_dir),
+        cwd=ROOT, env=env, text=True, encoding="utf-8", errors="replace", capture_output=True,
+    )
+    if completed.stdout.strip():
+        print(completed.stdout.rstrip())
+    if completed.stderr.strip():
+        print(completed.stderr.rstrip(), file=sys.stderr)
+
+    if completed.returncode == AUTH_ERROR_EXIT_CODE:
+        # 无人值守时这类失败最危险：它看起来像“今天没情报”，实际是 Key 掉了或积分用光。
+        print(
+            "警告：知了标讯凭证失败（API Key 缺失、被拒或积分不足），本次未产出任何候选；"
+            "需要修复凭证后重跑，详见上面的错误输出",
+            file=sys.stderr,
         )
-        if completed.stdout.strip():
-            print(completed.stdout.rstrip())
-        if completed.stderr.strip():
-            print(completed.stderr.rstrip(), file=sys.stderr)
-        summary = load_summary(source_dir)
-        usable = (source_dir / "candidate_index.jsonl").exists()
-        if usable:
-            usable_dirs.append(source_dir)
-        runs.append({
-            "source": source,
-            "exit_code": completed.returncode,
-            "usable": usable,
-            "source_dir": str(source_dir),
-            "summary": summary,
-        })
+
+    summary_path = source_dir / "search_summary.json"
+    source_summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else None
 
     if args.dry_run:
-        return 0 if all(run["exit_code"] == 0 for run in runs) else 2
-    if not usable_dirs:
-        print("错误：所有检索来源都失败，未生成候选目录", file=sys.stderr)
+        return 0 if completed.returncode == 0 else 2
+
+    if completed.returncode != 0:
+        # 三件事都必须做到，少一件这类故障就会被当成「今天没情报」放过：
+        # 1. 始终写摘要——没有摘要，下游分不清「跑了没结果」和「根本没跑成」；
+        # 2. 绝不复用同一天早先那次成功留下的候选目录，否则会把昨天的情报当今天的报一遍；
+        # 3. 凭证故障原样上抛退出码 3，不折成 2。
+        failure = {
+            "schema_version": 3,
+            "run_date": date.today().isoformat(),
+            "time_range": args.time_range,
+            "source": "zlbx",
+            "exit_code": completed.returncode,
+            "source_auth_failed": completed.returncode == AUTH_ERROR_EXIT_CODE,
+            "candidate_count": 0,
+            "failure_reason": (completed.stderr.strip() or "检索来源失败")[-2000:],
+            "source_summary": source_summary,
+        }
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "search_summary.json").write_text(
+            json.dumps(failure, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        print(f"错误：检索来源失败（退出码 {completed.returncode}），未产出候选；"
+              f"故障摘要：{out_dir / 'search_summary.json'}", file=sys.stderr)
+        return AUTH_ERROR_EXIT_CODE if completed.returncode == AUTH_ERROR_EXIT_CODE else 2
+
+    if not (source_dir / "candidate_index.jsonl").exists():
+        print("错误：检索来源失败，未生成候选目录", file=sys.stderr)
         return 2
 
-    merged = merge_source_dirs(usable_dirs)
+    merged = merge_source_dirs([source_dir])
     index = write_candidates(merged, out_dir, date.today().isoformat())
-    source_candidate_count = sum(
-        int((run.get("summary") or {}).get("candidate_count") or 0) for run in runs
-    )
+    source_candidate_count = int((source_summary or {}).get("candidate_count") or 0)
     summary = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_date": date.today().isoformat(),
         "time_range": args.time_range,
-        "sources": runs,
-        "source_count": len(runs),
-        "source_succeeded": sum(1 for run in runs if run["exit_code"] == 0),
-        "source_failed": sum(1 for run in runs if run["exit_code"] != 0),
-        "raw_result_count": sum(
-            int((run.get("summary") or {}).get("raw_result_count") or 0) for run in runs
-        ),
+        "source": "zlbx",
+        "exit_code": completed.returncode,
+        "source_auth_failed": completed.returncode == AUTH_ERROR_EXIT_CODE,
+        "raw_result_count": int((source_summary or {}).get("raw_result_count") or 0),
+        "request_count": int((source_summary or {}).get("request_count") or 0),
+        "cost_units": (source_summary or {}).get("cost_units"),
         "source_candidate_count": source_candidate_count,
-        "cross_source_duplicates": max(0, source_candidate_count - len(index)),
+        "intra_source_duplicates": max(0, source_candidate_count - len(index)),
         "candidate_count": len(index),
+        "already_seen_before_detail_count": int((source_summary or {}).get("already_seen_before_detail_count") or 0),
+        "source_summary": source_summary,
     }
     (out_dir / "search_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     print(
-        f"统一候选：来源内候选 {source_candidate_count} 条，跨来源去重 "
-        f"{summary['cross_source_duplicates']} 条，最终 {len(index)} 条"
+        f"统一候选：来源内候选 {source_candidate_count} 条，去重 "
+        f"{summary['intra_source_duplicates']} 条，最终 {len(index)} 条"
     )
     print(f"统一目录：{out_dir}")
-    return 0 if any(run["exit_code"] == 0 for run in runs) else 2
+    return 0
 
 
 if __name__ == "__main__":

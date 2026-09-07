@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""校验并发送Tender Intel固定15字段Webhook载荷。"""
+"""校验并发送IVD Bid Radar固定16字段Webhook载荷。"""
 
 import argparse
 import hashlib
@@ -8,14 +8,18 @@ import json
 import os
 import sys
 import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from tender_identity import IdentityIndex, remember_aliases
+from tender_ledger import (LedgerError, ledger_lock, read_ledger, save_ledger,
+                           confirmed_index, approved_index, add_confirmed, now_iso)
 
 
 FIELDS = [
-    "标题", "单位", "地区", "所属省/市", "所属大区", "发布时间", "截止时间",
+    "标题", "项目编号", "单位", "地区", "所属省/市", "所属大区", "发布时间", "截止时间",
     "预算", "采购方式", "科室", "命中关键词", "内容（检索的摘要）", "链接",
     "医院全名", "医院等级",
 ]
@@ -89,6 +93,8 @@ def atomic_write_json(path, value):
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(value, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp_name, path)
     except Exception:
         try:
@@ -110,10 +116,15 @@ def validate_payload(payload):
         if extra:
             errors.append(f"多余字段：{extra}")
         if not missing and not extra:
-            errors.append("字段顺序与固定15字段不一致")
+            errors.append("字段顺序与固定16字段不一致")
     for field, value in payload.items():
         if not isinstance(value, str) or value == "":
             errors.append(f"{field}必须是非空字符串；缺失填null")
+    if payload.get("标题") == "null":
+        errors.append("标题必填，不接受null")
+    if payload.get("命中关键词") == "null":
+        # 交给业务方的这条消息必须能解释「为什么会检索到它」，说不出命中词就别发。
+        errors.append("命中关键词必填，不接受null")
     province = payload.get("所属省/市")
     if province != "null" and province not in PROVINCE_LEVEL_DIVISIONS:
         errors.append("所属省/市必须是省级行政区或直辖市简称，例如北京、河北、上海、新疆")
@@ -134,7 +145,7 @@ def validate_manifest(manifest_path, payload_path, payload_sha256):
     if not (
         manifest.get("mode") == "daily-push"
         and manifest.get("live_push_allowed") is True
-        and manifest.get("state") == "VALIDATED"
+        and manifest.get("state") in {"VALIDATED", "PUSHED"}
     ):
         raise SendError("manifest必须为daily-push、live_push_allowed=true且state=VALIDATED")
     payload_path = Path(payload_path).resolve()
@@ -154,8 +165,100 @@ def validate_manifest(manifest_path, payload_path, payload_sha256):
     return manifest, candidate_id
 
 
+def send_once(manifest, candidate_id, payload_path, body, webhook_url, transport=None):
+    """在共享台账锁内查重、占位、发送、保存确认。未知结果不能自动重发。"""
+    from tender_pipeline import find_queue_candidate
+    transport = transport or urlopen
+    payload_path = Path(payload_path).resolve()
+    payload = json.loads(body.decode("utf-8"))
+    candidate = find_queue_candidate(manifest["pipeline_dir"], candidate_id)
+    if candidate is None:
+        raise SendError("本次队列没有该候选，禁止丢失公告身份后发送")
+    record = dict(payload)
+    remember_aliases(record, candidate)
+    seen_path = manifest["seen_path"]
+    receipt_path = Path(manifest["pipeline_dir"]) / "receipts" / f"push-{candidate_id}.json"
+    sha = sha256_bytes(body)
+    with ledger_lock(seen_path):
+        data = read_ledger(seen_path)
+        deliveries = data.setdefault("deliveries", {})
+        # 崩溃发生在保存成功回执之后、更新共享台账之前时，凭本地确认恢复，绝不重发。
+        for attempt in deliveries.values():
+            if attempt["status"] != "pending":
+                continue
+            path = Path(attempt["receipt_path"])
+            if path.exists():
+                saved = load_json(path)
+                if (saved.get("attempt_id") == attempt["attempt_id"]
+                        and saved.get("payload_sha256") == attempt["payload_sha256"]
+                        and saved.get("http_status") == 200 and saved.get("feishu_code") == 0):
+                    add_confirmed(data, attempt["record"], confirmed_at=saved["confirmed_at"])
+                    attempt["status"] = "confirmed"
+        duplicate, reason = confirmed_index(data).find(record)
+        if duplicate is not None:
+            remember_aliases(duplicate, record)
+            save_ledger(seen_path, data)
+            # 保留真实成功回执；跨运行跳过用独立状态，不伪造 HTTP 成功。
+            if not receipt_path.exists():
+                atomic_write_json(receipt_path, {
+                    "schema_version": 3, "flow": "push", "candidate_id": candidate_id,
+                    "payload_path": str(payload_path), "payload_sha256": sha,
+                    "delivery_status": "already_seen", "reason": reason,
+                    "checked_at": now_iso(),
+                })
+            return {"sent": False, "already_seen": True, "reason": reason, "receipt": str(receipt_path)}
+        possible, reason = confirmed_index(data).possible(record)
+        if possible is not None and approved_index(data).find(record)[0] is None:
+            save_ledger(seen_path, data)
+            raise SendError(
+                "疑似已入账，尚未发送：" + reason
+                + "；核对飞书后用 tender_pipeline.py resolve-review 登记结论"
+            )
+        pending, _ = IdentityIndex(a["record"] for a in deliveries.values()
+                                   if a["status"] == "pending").find(record)
+        if pending is not None:
+            save_ledger(seen_path, data)
+            raise SendError("该公告有未确认的发送尝试，已阻止重发；核对飞书后用 resolve-delivery 登记结果")
+        attempt_id = uuid.uuid4().hex
+        attempt = {
+            "attempt_id": attempt_id, "status": "pending", "started_at": now_iso(),
+            "record": record, "payload_sha256": sha, "receipt_path": str(receipt_path),
+        }
+        deliveries[attempt_id] = attempt
+        save_ledger(seen_path, data)  # 网络请求之前持久化；此后任何未知响应都保留 pending。
+        request = Request(webhook_url, data=body, method="POST",
+                          headers={"Content-Type": "application/json; charset=utf-8"})
+        try:
+            with transport(request, timeout=30) as response:
+                status = response.status
+                response_json = json.loads(response.read().decode("utf-8"))
+            if status != 200 or type(response_json.get("code")) is not int or response_json["code"] != 0:
+                raise SendError("飞书未确认 HTTP 200 / code 0，已保留发送占位")
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+            raise SendError("发送结果未知，已保留发送占位；核对飞书后再处理，不自动重发") from exc
+        receipt = {
+            "schema_version": 3, "flow": "push", "candidate_id": candidate_id,
+            "payload_path": str(payload_path), "payload_sha256": sha,
+            "http_status": 200, "feishu_code": 0, "confirmed_at": now_iso(),
+            "attempt_id": attempt_id,
+        }
+        atomic_write_json(receipt_path, receipt)
+        add_confirmed(data, payload, candidate, receipt["confirmed_at"])
+        attempt["status"] = "confirmed"
+        attempt["confirmed_at"] = receipt["confirmed_at"]
+        save_ledger(seen_path, data)
+        return {"sent": True, "http_status": 200, "feishu_code": 0, "receipt": str(receipt_path)}
+
+
 def main():
-    parser = argparse.ArgumentParser(description="发送固定15字段Tender Intel Webhook载荷")
+    # DryRun 会把整条载荷打回控制台。Windows 控制台默认 GBK，公告正文里的零宽连接符
+    # （U+200D）这类字符直接抛 UnicodeEncodeError，把 SKILL 规定的推送前离线校验卡死。
+    # 与 zlbx_search.py / tender_search.py 同一处置：先把两条流切到 UTF-8。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    parser = argparse.ArgumentParser(description="发送固定16字段IVD Bid Radar Webhook载荷")
     parser.add_argument("--payload", required=True)
     parser.add_argument("--manifest")
     parser.add_argument("--webhook-url", help="仅DryRun可显式传入；Live使用环境变量或config/webhook.json")
@@ -195,48 +298,10 @@ def main():
         if not webhook_url:
             raise SendError("未配置Webhook；请设置环境变量或config/webhook.json")
 
-        request = Request(
-            webhook_url,
-            data=body,
-            method="POST",
-            headers={"Content-Type": "application/json; charset=utf-8"},
-        )
-        try:
-            with urlopen(request, timeout=30) as response:
-                status = response.status
-                response_body = response.read().decode("utf-8")
-        except HTTPError as exc:
-            raise SendError(f"Webhook HTTP错误：{exc.code}") from exc
-        except URLError as exc:
-            raise SendError(f"Webhook请求失败：{exc.reason}") from exc
-        if status != 200:
-            raise SendError(f"Webhook HTTP状态不是200：{status}")
-        try:
-            response_json = json.loads(response_body)
-        except json.JSONDecodeError as exc:
-            raise SendError("Webhook响应不是JSON") from exc
-        if response_json.get("code") != 0:
-            raise SendError(f"Webhook未确认成功：code={response_json.get('code')}")
-
-        receipt_path = Path(manifest["pipeline_dir"]) / "receipts" / f"push-{candidate_id}.json"
-        atomic_write_json(receipt_path, {
-            "schema_version": 2,
-            "flow": "push",
-            "candidate_id": candidate_id,
-            "payload_path": str(payload_path),
-            "payload_sha256": payload_sha256,
-            "http_status": 200,
-            "feishu_code": 0,
-            "confirmed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        })
-        print(json.dumps({
-            "sent": True,
-            "http_status": 200,
-            "feishu_code": 0,
-            "receipt": str(receipt_path),
-        }, ensure_ascii=False, indent=2))
+        result = send_once(manifest, candidate_id, payload_path, body, webhook_url)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
-    except SendError as exc:
+    except (SendError, LedgerError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
 

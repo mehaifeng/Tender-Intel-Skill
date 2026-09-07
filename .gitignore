@@ -1,6 +1,6 @@
-# 豆包搜索直连配置含 API Key，禁止提交；参照 config/doubao.example.json 在本地创建
-config/doubao.json
-config/webhook.json
+# 含凭据，禁止提交；只有 *.example.json 模板入库
+config/*.json
+!config/*.example.json
 
 # 可分发包内含本地凭据，只保留在本机，不提交版本库
 dist/
@@ -10,10 +10,17 @@ dist/
 
 # 调试探针与临时产物（含 token 明文、下载的附件）
 .tmp/
+# 手工排查时的批次转储与一次性探针脚本，内容是业务情报，不入库
+_scratch/
 __pycache__/
 *.pyc
 
-# 去重表：仓库里只保留空骨架，运行后累积的业务情报不再提交
-# 注意：该文件已被跟踪，.gitignore 对它无效，实际靠 git update-index --skip-worktree 生效
-# 恢复跟踪：git update-index --no-skip-worktree data/seen.json
-data/seen.json
+# macOS 目录元数据
+.DS_Store
+
+# 医院索引的中间产物：未压缩版与重建前备份，只留 hospitals.min.json.gz 入库
+data/hospitals.min.json
+data/*.bak
+
+# 跨进程锁文件；状态在 seen.json 中，锁文件不打包
+*.json.lock
