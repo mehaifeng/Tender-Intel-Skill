@@ -17,7 +17,7 @@
 ## 0. 本次变更
 
 分支 `feat/zlbx-single-source`。**搜索层整体换成知了标讯单信源**，删除 CCGP、PLAP、
-睿销（jrbx）三个适配器及其全部描述。测试 121 条全绿
+睿销（jrbx）三个适配器及其全部描述。测试 184 条全绿
 （`python -m unittest discover -s tests`）。
 
 删除：`scripts/{ccgp,plap,jrbx}_search.py`、`references/{ccgp,plap,jrbx}.md`、

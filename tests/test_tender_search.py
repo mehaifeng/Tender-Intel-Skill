@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -88,9 +89,14 @@ class TenderSearchEntryTests(unittest.TestCase):
             self.assertIn("凭证", str(caught.exception))
 
     def test_dry_run_needs_no_credentials(self):
+        # 只摘掉凭证，其余环境照抄：清空 env 在 Windows 上会连 SYSTEMROOT 一起丢。
+        env = {k: v for k, v in os.environ.items() if k != "ZLBX_API_KEY"}
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "tender_search.py"), "--dry-run"],
-            cwd=ROOT, capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"},
+            cwd=ROOT, capture_output=True, text=True,
+            # 子进程按 UTF-8 输出中文；不写死就走 locale（简中 Windows 是 cp936），
+            # 解码线程会炸掉，stdout 变成 None。
+            encoding="utf-8", errors="replace", env=env,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("zlbx", result.stdout)
