@@ -301,13 +301,17 @@ def main():
             detail = {}
             try:
                 client = FeishuClient()
-                fields, dropped = build_fields(payload, client.fields())
-                detail = {"table_fields": len(fields), "dropped_fields": dropped,
-                          "omitted_null_fields": sorted(
-                              k for k, v in payload.items() if v == "null")}
+                schema = client.fields()
             except FeishuError as exc:
                 configured = False
                 detail = {"feishu_error": str(exc)}
+            else:
+                # 组字段时的报错（比如日期写法不认）不揉进 feishu_error，那会
+                # 把一条格式错误报成"没配好飞书"。让它冒到外层，dry-run 直接失败。
+                fields, dropped = build_fields(payload, schema)
+                detail = {"table_fields": len(fields), "dropped_fields": dropped,
+                          "omitted_null_fields": sorted(
+                              k for k, v in payload.items() if v == "null")}
             print(json.dumps({
                 "valid": True, "sent": False, "field_count": len(payload), "bytes": len(body),
                 "feishu_configured": configured, **detail, "payload": payload,
