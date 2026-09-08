@@ -55,13 +55,18 @@ def alias_variants(value):
 
 
 def loose_key(value):
-    """去掉行政区划通名的键，用于「撤县设市／设区」后的新旧名互认。
+    """去掉行政区划通名、并把医学院/医科大学归一的键，用于更名后的新旧名互认。
 
     弥勒 2013 年撤县设市，公告写「弥勒市人民医院」而索引里是「弥勒县人民医院」，
     精确键对不上。去掉市/县/区后两者都归到「弥勒人民医院」。
+
+    另一类是医学院升格更名：赣南医学院 2023 年经教育部批准更名赣南医科大学，
+    蚌埠、承德、长治等同期一批。公告写新名、索引留旧名，同样对不上。归一到同一个
+    写法即可，**不往索引里造新名**——这是一整类持续发生的更名，靠人工补别名跟不上。
+
     只在精确匹配全无命中时兜底，且撞车（朝阳区 vs 朝阳市）会被后续分组判为歧义。
     """
-    return re.sub(r"[市县区]", "", normalize(value))
+    return re.sub(r"[市县区]", "", normalize(value).replace("医科大学", "医学院"))
 
 
 # 名字打头的地名（故城县、呼和浩特市、山东省…）
@@ -143,8 +148,11 @@ class HospitalIndex:
             name_key = normalize(record.get("n"))
             if len(name_key) >= 4:
                 self.exact[name_key].append((index, "name"))
+                # 宽松键与精确键相同的记录也要入宽松索引：更名归一是**双向**的，
+                # 公告写新名（赣南医科大学…）、索引留旧名（赣南医学院…）时，
+                # 被查的正是那条「本来就是规范写法」的记录。漏掉它等于兜底键形同虚设。
                 relaxed = loose_key(record.get("n"))
-                if len(relaxed) >= 4 and relaxed != name_key:
+                if len(relaxed) >= 4:
                     self.loose[relaxed].append((index, "name"))
             for alias in alias_variants(record.get("a")):
                 alias_key = normalize(alias)

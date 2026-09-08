@@ -37,13 +37,13 @@
 | `scripts/hospital_match.py` | 医院名称、别名、等级的本地确定性匹配 |
 | `scripts/send_record.py` | 载荷 DryRun 与生产写入门禁 |
 | `scripts/send_record.ps1` | Windows兼容发送入口 |
-| `data/hospitals.min.json.gz` | 50,599家医疗单位精简运行索引 |
+| `data/hospitals.min.json.gz` | 50,601家医疗单位精简运行索引 |
 
 ## 配置
 
 开箱包已经包含本地`config/feishu_app.json`，可以直接运行。该文件含凭据，已被Git忽略，请勿公开分享。
 
-知了标讯 API Key 按环境变量`ZLBX_API_KEY` → `config/zlbx.json`的`api_key`顺序读取，模板见`config/zlbx.example.json`；该文件含凭据，已被Git忽略。Key没有到期机制，不需要定期换发。检索按调用次数计费，72h日窗一轮约24积分（列表）加每条取详情的候选1积分；2026-09-08 实跑 92 积分/轮，约¥184/月，实测明细见`references/zlbx.md`。详情里既有通过标题/标的物预筛的候选，也有「标的物是检验仪器或试剂、但品类信号只可能在正文里」的复核批（不设条数上限，见 zlbx.md「正文里才有的信号」）。适配器把每词命中数记在`data/query_hits.json`用于装箱降低调用次数，首次运行没有该文件时会多花约一倍列表调用。飞书自建应用凭据与目标多维表格按环境变量`FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_APP_TOKEN`/`FEISHU_TABLE_ID` → `config/feishu_app.json`的顺序读取，模板见`config/feishu_app.example.json`。应用需开通`bitable:app`，并在目标多维表格里通过「添加文档应用」加为协作者。
+知了标讯 API Key 按环境变量`ZLBX_API_KEY` → `config/zlbx.json`的`api_key`顺序读取，模板见`config/zlbx.example.json`；该文件含凭据，已被Git忽略。Key没有到期机制，不需要定期换发。检索按调用次数计费，72h日窗一轮约25积分（列表）加每条取详情的候选1积分；2026-09-08 实跑 113 积分/轮，约¥226/月，实测明细见`references/zlbx.md`。详情里既有通过标题/标的物预筛的候选，也有「标的物是检验仪器或试剂、或医疗机构买耗材器械，而品类信号只可能在正文里」的复核批（不设条数上限，见 zlbx.md「正文里才有的信号」）。适配器把每词命中数记在`data/query_hits.json`用于装箱降低调用次数，首次运行没有该文件时会多花约一倍列表调用。飞书自建应用凭据与目标多维表格按环境变量`FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_APP_TOKEN`/`FEISHU_TABLE_ID` → `config/feishu_app.json`的顺序读取，模板见`config/feishu_app.example.json`。应用需开通`bitable:app`，并在目标多维表格里通过「添加文档应用」加为协作者。
 
 ## 运行
 

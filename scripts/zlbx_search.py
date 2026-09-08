@@ -24,7 +24,7 @@ from tender_ledger import LedgerError, fetch_ledger, read_snapshot, save_snapsho
 from search_common import (
     body_completeness,
     compact_text,
-    lab_item_term,
+    reopen_reason,
     screen_domain,
     signal_tier,
     write_candidates,
@@ -643,10 +643,10 @@ def collect(client, queries, start, end, batch_size, page_size, max_details, led
         products = product_list_of(item)
         screen = screen_domain(title, products)
         weak = not screen["keep"] and not screen["signals"]
-        gate = lab_item_term(title, products) if weak else ""
+        gate = reopen_reason(title, products, _clean(item.get("caller_name"))) if weak else ""
         if weak and not gate:
-            # 标的物与标题都不是检验仪器或试剂，正文里出现本司品类的可能极低，
-            # 不值得为它花 1 积分。
+            # 既不是检验仪器/试剂，也不是医疗机构的耗材器械采购：正文里出现本司品类
+            # 的可能极低，不值得为它花 1 积分。
             prefilter_dropped.append({
                 "bid_id": bid_id, "title": title, "reason": screen["reason"],
             })
