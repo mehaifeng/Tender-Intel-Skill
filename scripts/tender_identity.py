@@ -65,15 +65,24 @@ def stage(value):
     return "采购" if family else ""
 
 
+# 「第2次更正」里的次数是这条公告改了第几回，不是招标轮次。把它算进轮次，
+# 同一个标的第1次、第2次更正就成了「轮次不同」，后续阶段压制（dedup_match
+# ._followup_match）与字符级比对同时被 blocked() 挡掉，同一个标会一次次重推。
+# 独立写在括号里的「（第二次）」仍然算轮次——那是重招，对销售是新的投标机会。
+REVISION_AFTER_ROUND = re.compile(r"^[)）\]】、，,\s]*(?:更正|变更|澄清|补充|答疑)")
+
 def scope(value):
     """保留轮次、批次、包/标段；不删除中文数字以求相似。"""
     value = text(value)
-    tokens = re.findall(
+    matches = re.finditer(
         # 包号也可以是中文数字（「第三包」「二标段」）；漏掉它会把同一项目的不同包
         # 当成同一条公告，字符级相似度还特别高，正是最容易误判重的写法。
         r"第?[一二三四五六七八九十百零〇两\d]+(?:次|批次|批|期|包|标段)"
         r"|重新招标|重新采购|(?:包|标段)\s*[A-Za-z\d]+"
         r"|[A-Za-z\d]+\s*(?:包|标段)", value)
+    tokens = [m.group() for m in matches
+              if not (m.group().endswith("次")
+                      and REVISION_AFTER_ROUND.match(value[m.end():]))]
     normalized = []
     for token in tokens:
         token = re.sub(r"\s+", "", token).lower().removeprefix("第").replace("批次", "批")

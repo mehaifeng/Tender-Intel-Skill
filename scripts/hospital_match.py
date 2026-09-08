@@ -69,6 +69,31 @@ def loose_key(value):
     return re.sub(r"[市县区]", "", normalize(value).replace("医科大学", "医学院"))
 
 
+# 「南昌市人民医院」打头的通名，用来判断宽松键是不是把两级行政区揉成了一家。
+LOOSE_DIVISION_RE = re.compile(r"^([一-鿿]{2,4})([市县])")
+
+
+def loose_division_conflict(name, record):
+    """宽松键把「X市…」和「X县…」并成一条时，判断这是更名还是两家真医院。
+
+    弥勒 2013 年撤县设市，「弥勒市人民医院」与索引里的「弥勒县人民医院」是同一家，
+    这类必须放行。但南昌市与南昌县同时存在——南昌县是南昌市下辖的县，
+    「南昌市人民医院」（西湖区）和「南昌县人民医院」（南昌县）是两家不同的医院，
+    去掉市/县后撞成同一个宽松键，会把等级和全名一起填错。
+
+    判据是记录自身的地理字段：X 同时是它的市又是它的区县，说明两级并存、不是更名。
+    """
+    query = LOOSE_DIVISION_RE.match(str(name or "").strip())
+    target = LOOSE_DIVISION_RE.match(str(record.get("n") or ""))
+    if not query or not target:
+        return False
+    if query.group(1) != target.group(1) or query.group(2) == target.group(2):
+        return False
+    locality = query.group(1)
+    return (normalize(record.get("c")).startswith(locality)
+            and normalize(record.get("d")).startswith(locality))
+
+
 # 名字打头的地名（故城县、呼和浩特市、山东省…）
 # 「省」在列，是因为「山东省南山医院」这类全称打头的记录同样会被错编码
 # （该条被编到四川内江市中区）。代价是「武警云南省总队医院」会截出「武警云」
@@ -243,6 +268,8 @@ class HospitalIndex:
             relaxed = loose_key(name)
             if len(relaxed) >= 4:
                 for record_index, key_kind in self.loose.get(relaxed, []):
+                    if loose_division_conflict(name, self.records[record_index]):
+                        continue
                     hits.append((0, len(relaxed), record_index, "loose", key_kind, relaxed))
 
         if not hits:
