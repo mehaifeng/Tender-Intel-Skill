@@ -154,6 +154,9 @@ def main():
         "intra_source_duplicates": max(0, source_candidate_count - len(index)),
         "candidate_count": len(index),
         "already_seen_before_detail_count": int((source_summary or {}).get("already_seen_before_detail_count") or 0),
+        # 标的物是检验仪器或试剂、品类信号只可能在正文里的那批：打开了多少、留下了多少。
+        "reopened_count": int((source_summary or {}).get("reopened_count") or 0),
+        "reopened_kept_count": int((source_summary or {}).get("reopened_kept_count") or 0),
         "source_summary": source_summary,
     }
     (out_dir / "search_summary.json").write_text(

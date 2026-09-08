@@ -16,7 +16,11 @@
   16 字段契约不变，但值为 `null` 的字段不再写进表。原自动化流程补的 `标讯来源=AI收集`、
   `标讯状态=新推送`、`是否已推送`、两个时间戳，改由发送器自己写。
 - 写入结果未知时按链接回查确认，回查不到就停且不重试；不再有本地发送占位与 resolve-delivery。
-- Windows 入口转调 Python。详细规则见 references/dedup.md。
+- 2026-09-08：列表层预筛不再直接丢弃「标的物是检验仪器或试剂、但无品类信号」的公告，
+  改为取详情用正文复核，只有核心词才入队（`search_common.LAB_ITEM_TERMS` +
+  `zlbx_search.collect` 的 reopen 分支）。**不设条数上限**，超 150 只报警。
+  成本 57 → 92 积分/轮（¥132 → ¥184/月），实跑候选 33 → 41 条。
+- Windows 入口转调 Python。详细规则见 references/dedup.md 与 references/zlbx.md。
 
 以下为改造前历史背景；与上述当前约定冲突时以当前约定及 dedup.md 为准。
 

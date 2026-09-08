@@ -347,3 +347,78 @@ class BatchPlanningTests(unittest.TestCase):
         collect_listings(client, ["过敏"], _t(), _t(), 8, MAX_PAGE_SIZE, stats,
                          counts={"过敏": 7}, days=1)
         self.assertEqual(stats["observed_hit_counts"], {"过敏": 7.0})
+
+
+class ReopenForBodySignalTests(unittest.TestCase):
+    """标的物是检验仪器或试剂、品类信号只在正文里的公告，必须打开正文再判。
+
+    定标用例是 2026-09-07 实际漏掉的那条军队采购意向：sm_names 全是仪器名，
+    唯一命中词 `变态反应` 只出现在正文里，结果在取详情之前就被整条丢掉。
+    """
+
+    MILITARY = {
+        "bid_id": 1, "title": "一批医疗设备采购项目意向公开公示(2026-JQ08-W9075)",
+        "pub_time": "2026-09-07", "url": "https://x.org/mil", "caller_name": "",
+        "sm_names": ["多参数生物反馈仪", "全自动化学发光分析仪", "凝血分析仪"],
+    }
+
+    def run_collect(self, listing, body, ledger=()):
+        details = {}
+
+        def fake_detail(client, item):
+            details[item["bid_id"]] = details.get(item["bid_id"], 0) + 1
+            return {"source": body, "source_url": "https://origin.example/1",
+                    "bid_id": item["bid_id"], "title": item["title"]}
+
+        with patch.object(zlbx_search, "collect_listings",
+                          return_value={listing["bid_id"]: listing}), \
+             patch.object(zlbx_search, "fetch_detail", side_effect=fake_detail):
+            candidates, stats = zlbx_search.collect(
+                None, ["变态反应", "过敏", "印迹"], datetime(2026, 9, 5), datetime(2026, 9, 8),
+                8, 50, 60, ledger_records=list(ledger))
+        return candidates, stats, details
+
+    def test_body_only_signal_is_reopened_and_queued(self):
+        body = "本项目采购变态反应科过敏原检测相关设备，含全自动化学发光分析仪一台。"
+        candidates, stats, details = self.run_collect(self.MILITARY, body)
+        self.assertEqual(stats["reopened_count"], 1)
+        self.assertEqual(stats["reopened_kept_count"], 1)
+        self.assertEqual(details, {1: 1})
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(stats["reopened_kept"][0]["gate"], "分析仪")
+        # 命中归因要按正文重算，否则这条候选说不出「为什么会检索到它」。
+        self.assertTrue(candidates[0]["found_by_source_query"])
+
+    def test_body_with_only_broad_fragments_is_still_dropped(self):
+        # 宽片段在几十行的设备清单里几乎必然出现一次，靠它放行等于全量取详情。
+        body = "本项目采购免疫印迹成像仪一台，用于科研凝胶成像。"
+        candidates, stats, _ = self.run_collect(self.MILITARY, body)
+        self.assertEqual(stats["reopened_count"], 1)
+        self.assertEqual(stats["reopened_kept_count"], 0)
+        self.assertEqual(candidates, [])
+        self.assertIn("宽片段", stats["reopened_dropped"][0]["reason"])
+
+    def test_body_without_any_signal_is_dropped(self):
+        candidates, stats, _ = self.run_collect(self.MILITARY, "本项目采购办公家具与空调。")
+        self.assertEqual(stats["reopened_kept_count"], 0)
+        self.assertEqual(candidates, [])
+
+    def test_non_lab_items_never_reach_the_detail_call(self):
+        listing = {"bid_id": 2, "title": "幼儿园班配教玩具采购项目竞争性谈判公告",
+                   "pub_time": "2026-09-07", "url": "https://x.org/toy", "caller_name": "某教育局",
+                   "sm_names": ["教学仪器", "塑料轮", "班配教玩具"]}
+        candidates, stats, details = self.run_collect(listing, "含变态反应字样的无关正文")
+        self.assertEqual(stats["reopened_count"], 0)
+        self.assertEqual(stats["prefilter_dropped_count"], 1)
+        self.assertEqual(details, {})
+        self.assertEqual(candidates, [])
+
+    def test_already_in_the_ledger_is_skipped_before_spending_a_detail_call(self):
+        ledger = [{"标题": self.MILITARY["title"], "链接": "https://x.org/mil",
+                   "单位": "", "发布时间": "2026-09-07", "_pushed": True,
+                   "_feishu_id": "ZB-0001"}]
+        candidates, stats, details = self.run_collect(
+            self.MILITARY, "变态反应科过敏原检测设备", ledger=ledger)
+        self.assertEqual(stats["already_seen_before_detail_count"], 1)
+        self.assertEqual(stats["reopened_count"], 0)
+        self.assertEqual(details, {})
