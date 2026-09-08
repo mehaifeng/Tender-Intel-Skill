@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -19,6 +21,8 @@ BASE = "https://open.feishu.cn/open-apis"
 ROOT = Path(__file__).resolve().parent.parent
 APP_CONFIG = ROOT / "config" / "feishu_app.json"
 TIMEOUT = 30
+# 多维表格按租户时区渲染日期字段，这张表在 Asia/Shanghai。
+TENANT_TZ = timezone(timedelta(hours=8))
 PAGE_SIZE = 500
 READ_RETRIES = 2
 
@@ -196,6 +200,43 @@ def cell_text(value):
     return str(value)
 
 
+def epoch_ms(value):
+    """`2026-09-04` / `2026-09-04T09:00` -> 毫秒时间戳；已是时间戳的原样返回。
+
+    多维表格的日期字段收发的都是毫秒时间戳，按租户时区（Asia/Shanghai）渲染。
+    载荷里的日期是本地日历日，所以按 +08 解释，否则会整体前移一天。
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    match = re.fullmatch(r"(20\d{2})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?", text)
+    if not match:
+        return None
+    year, month, day, hour, minute, second = match.groups()
+    stamp = datetime(int(year), int(month), int(day),
+                     int(hour or 0), int(minute or 0), int(second or 0), tzinfo=TENANT_TZ)
+    return int(stamp.timestamp() * 1000)
+
+
+def date_text(value, with_time=False):
+    """日期字段读出来是毫秒时间戳，按租户时区还原成 `YYYY-MM-DD`。
+
+    判重、身份比对都按日历日算，拿到毫秒数会让 `publish_date` 解析失败、日期门
+    静默失效，所以读台账时统一在这里还原。
+    """
+    text = cell_text(value).strip()
+    if not text.isdigit():
+        return text
+    stamp = datetime.fromtimestamp(int(text) / 1000, TENANT_TZ)
+    return stamp.strftime("%Y-%m-%dT%H:%M" if with_time else "%Y-%m-%d")
+
+
 def cell_value(field_type, value):
     """按字段类型生成写入值；返回 None 表示这个字段不写。"""
     if value is None:
@@ -206,7 +247,7 @@ def cell_value(field_type, value):
     if field_type == CHECKBOX:
         return bool(value)
     if field_type == DATETIME:
-        return int(value)
+        return epoch_ms(value)
     if field_type == NUMBER:
         return float(value)
     text = str(value).strip()

@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from feishu_client import FeishuClient, FeishuError, cell_text
+from feishu_client import FeishuClient, FeishuError, cell_text, date_text
 
 SNAPSHOT_NAME = "ledger_snapshot.json"
 SCHEMA_VERSION = 4
@@ -65,7 +65,10 @@ def to_record(item):
     """一行多维表格 -> 判重记录。业务字段一律不带进来，只留身份与正文。"""
     fields = item.get("fields") or {}
     record = {name: cell_text(fields.get(name)) for name in
-              ("标题", "项目编号", "单位", "医院全名", "所属省/市", "地区", "发布时间", "链接", "内容")}
+              ("标题", "项目编号", "单位", "医院全名", "所属省/市", "地区", "链接", "内容")}
+    # 发布时间是日期字段，读出来是毫秒时间戳。判重全按日历日算，不还原成
+    # YYYY-MM-DD 的话日期门会静默失效，只剩强身份那一层还认得出重复。
+    record["发布时间"] = date_text(fields.get("发布时间"))
     record["_feishu_id"] = cell_text(fields.get("编号"))
     record["_record_id"] = item.get("record_id", "")
     record["_feishu_source"] = cell_text(fields.get("标讯来源"))
