@@ -122,6 +122,37 @@ def tender_core(ident):
     return core
 
 
+# 分包写法：更正只改其中一个包，台账里那条总招标却一个包号都不带。
+PACKAGE_SCOPE = re.compile(r"(?:包|标段|批)$")
+# 台账主体要认成「候选的总标」，至少得有这么长；再短就是「设备采购」这类通用写法，
+# 拿子串关系判重会把同一家医院的不同标全并成一条。
+SUBJECT_CONTAIN_MIN = 12
+
+
+def umbrella_covers(a, b):
+    """台账那行是覆盖全部包的总招标、候选是它其中一个包的更正吗？
+
+    总招标公告的标题往往一个包号都不写，更正才点名「第四包」。此时轮次门
+    （a.scope != b.scope）会把这一对踢掉，同一个标的每一个包的每一次更正都能
+    重新推一遍。放行只限这一个方向，且候选带的必须是包号：
+    台账行自己带包号时照旧卡住（第一包已推 ≠ 第三包的更正），候选带的是
+    「次/期/重新招标」这类轮次词时也照旧卡住——重招对销售是新的投标机会。
+    """
+    return bool(not b.scope and a.scope
+                and all(PACKAGE_SCOPE.search(token) for token in a.scope))
+
+
+def subject_contains(ledger_core, candidate_core):
+    """台账标的主体是候选主体的子串——更正在原标题后追加包号与标的时的常态。
+
+    「…检验科设备采购项目」与「…检验科设备采购项目第四包全自动免疫印迹仪…」
+    字符级相似度只有 0.69（越写得细越低），但前者整个包在后者里。包含关系比
+    相似度更能说明「是同一个标的细化」，相似度量不出来。
+    """
+    return bool(ledger_core and len(ledger_core) >= SUBJECT_CONTAIN_MIN
+                and ledger_core in candidate_core)
+
+
 def title_evidence_ok(a, b):
     """没有采购人佐证时，只有点名医院的长标题才敢按标题判重。"""
     if a.buyer and a.buyer == b.buyer:
@@ -193,7 +224,7 @@ class LedgerMatcher:
             return None, ""
         core_a = tender_core(a)
         for i, b in enumerate(self.identities):
-            if a.scope != b.scope:
+            if a.scope != b.scope and not umbrella_covers(a, b):
                 continue
             if a.project and b.project and a.project != b.project:
                 continue
@@ -201,9 +232,11 @@ class LedgerMatcher:
             if gap is None or gap > FOLLOWUP_DAYS:
                 continue
             same_project = bool(a.project and a.project == b.project)
+            core_b = tender_core(b)
             same_subject = bool(
                 a.buyer and a.buyer == b.buyer and len(core_a) >= 4
-                and similarity(core_a, tender_core(b)) >= FOLLOWUP_TITLE_SIM)
+                and (similarity(core_a, core_b) >= FOLLOWUP_TITLE_SIM
+                     or subject_contains(core_b, core_a)))
             if not (same_project or same_subject):
                 continue
             return self.records[i], (

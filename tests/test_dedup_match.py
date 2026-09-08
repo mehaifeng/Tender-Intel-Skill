@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from tender_identity import scope
 from dedup_match import (CONTENT_HIGH, TITLE_HIGH, TITLE_LOW, TOP_K, LedgerMatcher,
                          similarity)
 
@@ -81,6 +82,44 @@ class FunnelLayerTests(unittest.TestCase):
         rows = [self.base(标题="甲医院过敏原检测试剂采购项目(第一包)公开招标公告")]
         match = self.check(rows, self.correction(
             标题="关于甲医院过敏原检测试剂采购项目(第三包)的更正公告"))
+        self.assertEqual(match.verdict, "new")
+
+    def test_second_correction_is_suppressed_by_the_first_one(self):
+        # 「第2次更正」的次数是改了第几回，不是招标轮次。把它算进轮次，
+        # 第1次与第2次更正就成了「轮次不同」，同一个标会被反复推给销售。
+        first = ledger(
+            标题="甲医院检验科设备采购项目（第四包全自动免疫印迹仪、酶联免疫分析系统）第1次更正",
+            链接="https://x.org/fix1", 发布时间="2026-09-04")
+        match = self.check([first], candidate(
+            标题="甲医院检验科设备采购项目（第四包全自动免疫印迹仪，酶联免疫分析系统）第2次更正",
+            链接="https://y.org/fix2", 发布时间="2026-09-08"))
+        self.assertEqual((match.verdict, match.layer), ("duplicate", "L1-后续阶段"))
+
+    def test_retender_round_survives_the_revision_counter_rule(self):
+        # 「（第二次）」独立成轮次，仍是重招、仍是新机会，不能被上面那条规则顺手吃掉。
+        self.assertEqual(scope("甲医院试剂采购项目（第二次）公开招标公告"), ("2次",))
+        self.assertEqual(scope("甲医院试剂采购项目（第四包…）第2次更正"), ("4包",))
+
+    def test_correction_of_one_package_is_suppressed_by_the_umbrella_tender(self):
+        # 总招标一个包号都不写，更正才点名「第四包」。轮次门卡住这一对的话，
+        # 同一个标的每个包的每次更正都能重推一遍。
+        rows = [self.base(标题="甲医院2026年检验科设备更新采购项目招标公告")]
+        match = self.check(rows, self.correction(
+            标题="甲医院2026年检验科设备更新采购项目（第四包全自动免疫印迹仪、酶联免疫分析系统）第1次更正"))
+        self.assertEqual((match.verdict, match.layer), ("duplicate", "L1-后续阶段"))
+
+    def test_umbrella_relaxation_does_not_swallow_a_retender_correction(self):
+        # 放行只给包号。候选带的是轮次（重招）时照旧卡住——那是新的投标机会。
+        rows = [self.base(标题="甲医院2026年检验科设备更新采购项目招标公告")]
+        match = self.check(rows, self.correction(
+            标题="甲医院2026年检验科设备更新采购项目（第二次）第1次更正"))
+        self.assertEqual(match.verdict, "new")
+
+    def test_umbrella_relaxation_needs_a_long_enough_subject(self):
+        # 台账主体短到只剩通用写法时，子串关系不足以判重，否则同院不同标会被并成一条。
+        rows = [ledger(标题="甲医院设备采购公告", 单位="甲医院")]
+        match = self.check(rows, self.correction(
+            标题="甲医院设备采购项目（第二包过敏原检测试剂）第1次更正"))
         self.assertEqual(match.verdict, "new")
 
     def test_retender_is_not_suppressed_by_the_first_round(self):

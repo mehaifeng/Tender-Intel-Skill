@@ -55,13 +55,43 @@ def alias_variants(value):
 
 
 def loose_key(value):
-    """去掉行政区划通名的键，用于「撤县设市／设区」后的新旧名互认。
+    """去掉行政区划通名、并把医学院/医科大学归一的键，用于更名后的新旧名互认。
 
     弥勒 2013 年撤县设市，公告写「弥勒市人民医院」而索引里是「弥勒县人民医院」，
     精确键对不上。去掉市/县/区后两者都归到「弥勒人民医院」。
+
+    另一类是医学院升格更名：赣南医学院 2023 年经教育部批准更名赣南医科大学，
+    蚌埠、承德、长治等同期一批。公告写新名、索引留旧名，同样对不上。归一到同一个
+    写法即可，**不往索引里造新名**——这是一整类持续发生的更名，靠人工补别名跟不上。
+
     只在精确匹配全无命中时兜底，且撞车（朝阳区 vs 朝阳市）会被后续分组判为歧义。
     """
-    return re.sub(r"[市县区]", "", normalize(value))
+    return re.sub(r"[市县区]", "", normalize(value).replace("医科大学", "医学院"))
+
+
+# 「南昌市人民医院」打头的通名，用来判断宽松键是不是把两级行政区揉成了一家。
+LOOSE_DIVISION_RE = re.compile(r"^([一-鿿]{2,4})([市县])")
+
+
+def loose_division_conflict(name, record):
+    """宽松键把「X市…」和「X县…」并成一条时，判断这是更名还是两家真医院。
+
+    弥勒 2013 年撤县设市，「弥勒市人民医院」与索引里的「弥勒县人民医院」是同一家，
+    这类必须放行。但南昌市与南昌县同时存在——南昌县是南昌市下辖的县，
+    「南昌市人民医院」（西湖区）和「南昌县人民医院」（南昌县）是两家不同的医院，
+    去掉市/县后撞成同一个宽松键，会把等级和全名一起填错。
+
+    判据是记录自身的地理字段：X 同时是它的市又是它的区县，说明两级并存、不是更名。
+    """
+    query = LOOSE_DIVISION_RE.match(str(name or "").strip())
+    target = LOOSE_DIVISION_RE.match(str(record.get("n") or ""))
+    if not query or not target:
+        return False
+    if query.group(1) != target.group(1) or query.group(2) == target.group(2):
+        return False
+    locality = query.group(1)
+    return (normalize(record.get("c")).startswith(locality)
+            and normalize(record.get("d")).startswith(locality))
 
 
 # 名字打头的地名（故城县、呼和浩特市、山东省…）
@@ -143,8 +173,11 @@ class HospitalIndex:
             name_key = normalize(record.get("n"))
             if len(name_key) >= 4:
                 self.exact[name_key].append((index, "name"))
+                # 宽松键与精确键相同的记录也要入宽松索引：更名归一是**双向**的，
+                # 公告写新名（赣南医科大学…）、索引留旧名（赣南医学院…）时，
+                # 被查的正是那条「本来就是规范写法」的记录。漏掉它等于兜底键形同虚设。
                 relaxed = loose_key(record.get("n"))
-                if len(relaxed) >= 4 and relaxed != name_key:
+                if len(relaxed) >= 4:
                     self.loose[relaxed].append((index, "name"))
             for alias in alias_variants(record.get("a")):
                 alias_key = normalize(alias)
@@ -235,6 +268,8 @@ class HospitalIndex:
             relaxed = loose_key(name)
             if len(relaxed) >= 4:
                 for record_index, key_kind in self.loose.get(relaxed, []):
+                    if loose_division_conflict(name, self.records[record_index]):
+                        continue
                     hits.append((0, len(relaxed), record_index, "loose", key_kind, relaxed))
 
         if not hits:

@@ -422,3 +422,28 @@ class ReopenForBodySignalTests(unittest.TestCase):
         self.assertEqual(stats["already_seen_before_detail_count"], 1)
         self.assertEqual(stats["reopened_count"], 0)
         self.assertEqual(details, {})
+
+    DENTAL = {
+        "bid_id": 3, "title": "反角手机等一批耗材器械遴选公告", "pub_time": "2026-09-07",
+        "url": "https://x.org/dental", "caller_name": "赣南医科大学第三附属医院",
+        "sm_names": ["反角手机", "临时耗材器械"],
+    }
+
+    def test_hospital_supply_lot_is_reopened_even_without_a_lab_instrument(self):
+        # 2026-09-07 漏掉的第二条：标的物只写「一批耗材器械」，
+        # 抗核抗体谱只在正文明细表里。医院 + 耗材器械就够格打开正文。
+        body = "序号2 抗核抗体谱（IgG）检测试剂 16人份/盒 检测方法：印迹法。"
+        candidates, stats, details = self.run_collect(self.DENTAL, body)
+        self.assertEqual(stats["reopened_kept_count"], 1)
+        self.assertEqual(stats["reopened_kept"][0]["gate"], "耗材")
+        self.assertEqual(details, {3: 1})
+        self.assertEqual(len(candidates), 1)
+
+    def test_supply_lot_from_a_non_medical_buyer_is_not_reopened(self):
+        listing = dict(self.DENTAL, bid_id=4, caller_name="某市公安局刑侦支队",
+                       title="一批耗材器械采购公告")
+        candidates, stats, details = self.run_collect(listing, "含抗核抗体谱的无关正文")
+        self.assertEqual(stats["reopened_count"], 0)
+        self.assertEqual(stats["prefilter_dropped_count"], 1)
+        self.assertEqual(details, {})
+        self.assertEqual(candidates, [])

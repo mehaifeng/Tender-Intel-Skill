@@ -159,6 +159,34 @@ def lab_item_term(*texts):
     return match.group(0) if match else ""
 
 
+# 医疗机构字样。**不查医院索引**：索引跟不上更名（`赣南医科大学第三附属医院` 2023 年
+# 由赣南医学院更名，索引里还是旧名，explicit 匹配直接落空），而这道门只是决定要不要
+# 花 1 积分打开正文，宁可用字面标记，也不要被索引的滞后卡住。
+MEDICAL_BUYER_HINT = re.compile(
+    r"医院|卫生院|保健院|医学中心|医疗中心|门诊部|卫生服务中心"
+    r"|医科大学|医学院|中医院|妇幼|疾控|血站"
+)
+# 医疗机构的耗材/器械采购：这类公告的标的物清单常常只写「一批耗材器械」，
+# 具体到哪几样只在正文的明细表里。2026-09-07 漏掉的赣南医大三附院那条就是这样
+# ——`抗核抗体谱（IgG）检测试剂` 只出现在详情的表格里。
+SUPPLY_TERMS = re.compile(r"耗材|器械")
+
+
+def reopen_reason(title, product_list, buyer=""):
+    """判定这条公告值不值得花 1 积分打开正文；不值得返回空串。
+
+    两种值得：标的物/标题里有检验类仪器或试剂；或者采购人像医疗机构、买的是
+    耗材器械——两种情况下品类信号都可能只写在正文里，而列表层看不到正文。
+    """
+    term = lab_item_term(title, product_list)
+    if term:
+        return term
+    if MEDICAL_BUYER_HINT.search(buyer or "") and SUPPLY_TERMS.search(
+            "\n".join(t for t in (title, product_list) if t)):
+        return SUPPLY_TERMS.search("\n".join(t for t in (title, product_list) if t)).group(0)
+    return ""
+
+
 # 标题里的并列分隔符。`和` 不收：中文地名与项目名里到处是它（和田地区、和美乡村），
 # 切错的代价是把一条本该丢的公告放进队列，不如不切。
 TITLE_SEGMENT_SPLIT_RE = re.compile(r"[、，,；;／/｜|]+|以及|及")

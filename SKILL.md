@@ -36,7 +36,7 @@ python scripts/tender_pipeline.py authorize-unattended --run-dir <检索目录>
 python scripts/tender_search.py
 ```
 
-默认最近72小时；因为接口的`pub_time`可能比实际发布日早一天，实际请求窗口会自动往前多放一天（两个窗口都记在`search_summary.json`）。适配器按 keywords.md 的85条清单自适应分批检索、对通过预筛的候选取详情正文，并把链接回源到原始站点。标题与标的物无品类信号、但标的物是**检验类仪器或试剂**的公告也会取详情复核（品类信号常常只写在正文里），只有正文命中**核心词**才入队；计数见`reopened_count`/`reopened_kept_count`。
+默认最近72小时；因为接口的`pub_time`可能比实际发布日早一天，实际请求窗口会自动往前多放一天（两个窗口都记在`search_summary.json`）。适配器按 keywords.md 的91条清单自适应分批检索、对通过预筛的候选取详情正文，并把链接回源到原始站点。标题与标的物无品类信号、但标的物是**检验类仪器或试剂**的公告也会取详情复核（品类信号常常只写在正文里），只有正文命中**核心词**才入队；计数见`reopened_count`/`reopened_kept_count`。
 
 **退出码 3 表示 API Key 缺失、被拒或积分不足**——那是凭证故障，不是“今天没有情报”，必须报警而不是按空结果继续。检索层任何非零退出都会写下故障摘要（`source_auth_failed`、`failure_reason`）并且**不会复用同一天早先那次的候选目录**；`prepare`遇到这样的摘要会直接拒绝排队。接口约束与实测行为见[知了标讯适配器](references/zlbx.md)。
 
@@ -147,7 +147,7 @@ Windows旧任务的`scripts/send_record.ps1`转调同一Python发送器。发送
 
 检索词与候选筛选的唯一依据是业务方《过敏》《自免》两张关键词表，落地在[关键词与Query](references/keywords.md)：**表里一行一条 query，项目代号一律进检索**。适配器从 keywords.md 读清单，不另存副本。
 
-引擎是**精确子串匹配**，因此取词规则是**每行放宽到还能指代该项目的最短片段，宁可多捞、由核实阶段的模型判掉**（`红斑狼疮` → `狼疮`、`免疫印迹仪` → `印迹`、`类风湿` → `风湿`）。**筛选层必须跟着放宽到同一批片段**，否则宽词捞回来的公告在预筛就被扔掉，等于白捞——两侧由 `test_screening_accepts_every_broadened_query_form` 钉在一起。放宽的下限与被否决的过宽写法（`硬化`、`胰岛`、`磷脂`）见 keywords.md。
+引擎是**分词匹配**（2026-09-08 证伪了原先「精确子串匹配」的判断，见 keywords.md），取词规则是**每行放宽到还能指代该项目的最短片段，宁可多捞、由核实阶段的模型判掉**（`红斑狼疮` → `狼疮`、`免疫印迹仪` → `印迹`、`类风湿` → `风湿`）。**筛选层必须跟着放宽到同一批片段**，否则宽词捞回来的公告在预筛就被扔掉，等于白捞——两侧由 `test_screening_accepts_every_broadened_query_form` 钉在一起。放宽的下限与被否决的过宽写法（`硬化`、`胰岛`、`磷脂`）见 keywords.md。
 
 候选筛选走 `scripts/search_common.py` 的 `TARGET_CATEGORY_PATTERNS`（18 组，即两张表的谱系加拆出来的 `风湿(宽片段)`）；排除词 `EXCLUDE_TERMS`（`酶标仪`、`电泳`、兽用/科研/核酸等）**从不在正文域决定去留**：命中正文（含标的物清单）只写进 `search_evidence.body_exclude_term` 供核实阶段参考，不丢候选。命中标题一般丢，唯一例外是排除词与本司品类在标题里是**并列的两个标的**（`…（7种培养基）、抗β2糖蛋白1IgG等（5种）试剂盒…`），这时保留并写进 `search_evidence.title_exclude_term`；排除词只是同一标的的限定语时（`兽用自身抗体检测试剂`）照旧丢。统一入口 `search_common.screen_domain()`。无差别连坐会把「过敏原/自免标的 + 一台 PCR 仪」的混合包整类打掉，实测两天窗口因此漏掉 6 条真候选而同期只推送 2 条，明细见[关键词与Query](references/keywords.md)「排除词」。两张表以外的词——方法学、仪器、甲状腺等——既不检索也不算命中。
 
