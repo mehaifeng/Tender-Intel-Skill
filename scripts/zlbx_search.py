@@ -24,7 +24,9 @@ from tender_ledger import LedgerError, fetch_ledger, read_snapshot, save_snapsho
 from search_common import (
     body_completeness,
     compact_text,
+    lab_item_term,
     screen_domain,
+    signal_tier,
     write_candidates,
 )
 
@@ -46,6 +48,9 @@ MAX_PAGE_SIZE = 50
 MATCH_MODES = ["fulltext"]
 
 NETWORK_RETRIES = 2
+# 需要打开正文复核的条数超过它就报警——门开得太宽会把成本推上去。只报警不截断：
+# 撞上限就停会让「标的物是配我们试剂的仪器」这类整批漏掉，那是这次改动要修的问题。
+REOPEN_VOLUME_WARNING = 150
 
 
 class ZlbxError(Exception):
@@ -632,11 +637,16 @@ def collect(client, queries, start, end, batch_size, page_size, max_details, led
     prefilter_dropped = []
     already_seen = []
     kept = []
+    reopen = []
     for bid_id, item in listings.items():
         title = _clean(item.get("title"))
-        screen = screen_domain(title, product_list_of(item))
-        if not screen["keep"] and not screen["signals"]:
-            # 列表层只有标题与标的物；正文可能还有信号，先记一笔再看是否值得取详情。
+        products = product_list_of(item)
+        screen = screen_domain(title, products)
+        weak = not screen["keep"] and not screen["signals"]
+        gate = lab_item_term(title, products) if weak else ""
+        if weak and not gate:
+            # 标的物与标题都不是检验仪器或试剂，正文里出现本司品类的可能极低，
+            # 不值得为它花 1 积分。
             prefilter_dropped.append({
                 "bid_id": bid_id, "title": title, "reason": screen["reason"],
             })
@@ -650,13 +660,15 @@ def collect(client, queries, start, end, batch_size, page_size, max_details, led
                                  "match_layer": match.layer,
                                  "matched_feishu_id": (match.matched or {}).get("_feishu_id")})
             continue
-        kept.append((bid_id, item))
+        (reopen if weak else kept).append((bid_id, item, gate))
 
-    kept.sort(key=lambda row: _clean(row[1].get("pub_time")), reverse=True)
+    by_date = lambda row: _clean(row[1].get("pub_time"))  # noqa: E731
+    kept.sort(key=by_date, reverse=True)
+    reopen.sort(key=by_date, reverse=True)
     candidates = []
     detail_calls = 0
     dropped_no_url = 0
-    for bid_id, item in kept:
+    for bid_id, item, _ in kept:
         detail = None
         if detail_calls < max_details:
             try:
@@ -672,12 +684,60 @@ def collect(client, queries, start, end, batch_size, page_size, max_details, led
             continue
         candidates.append(candidate)
 
+    # 二次机会：标的物/标题是检验仪器或试剂，但品类信号只可能在正文里。
+    # **不设条数上限**——撞上限就停会让「标的物是配我们试剂的仪器」这类整批漏掉。
+    # 量真的大起来说明这道门开得不对，那要改门，不是靠截断掩盖，所以只报警不截断。
+    if len(reopen) > REOPEN_VOLUME_WARNING:
+        print(f"警告：有 {len(reopen)} 条需要打开正文复核，远超预期（>{REOPEN_VOLUME_WARNING}）；"
+              f"本轮仍会全部取详情，但 search_common.LAB_ITEM_TERMS 这道门可能过宽，请复核",
+              file=sys.stderr)
+    reopened_kept = []
+    reopened_dropped = []
+    for bid_id, item, gate in reopen:
+        title = _clean(item.get("title"))
+        try:
+            detail = fetch_detail(client, item)
+            detail_calls += 1
+        except ZlbxAuthError:
+            raise
+        except ZlbxError as exc:
+            print(f"警告：标讯 {bid_id} 详情获取失败：{exc}", file=sys.stderr)
+            reopened_dropped.append({"bid_id": bid_id, "title": title, "gate": gate,
+                                     "reason": f"详情获取失败：{exc}"})
+            continue
+        body = html_to_text(detail.get("source"))
+        products = product_list_of(item) or product_list_of(detail)
+        screen = screen_domain(title, "\n".join(filter(None, (products, body))))
+        tier = signal_tier(screen["signals"])
+        # 只有核心词才放行：宽片段（印迹/风湿/细胞因子/25羟基维生素D）在几十行的
+        # 科室设备清单里几乎必然出现一次，靠它放行等于把这道门变成全量取详情。
+        if not screen["keep"] or tier != "core":
+            reopened_dropped.append({
+                "bid_id": bid_id, "title": title, "gate": gate, "signal_tier": tier,
+                "reason": screen["reason"] if not screen["keep"] else "正文只命中宽片段，非核心词",
+            })
+            continue
+        # 命中归因要重算：这些词本来就只出现在正文里，列表层那次回推必然是空的。
+        haystack = "\n".join((title, products, body, _clean(item.get("caller_name")))).lower()
+        body_hits = {(number, word) for number, word in numbered if word.lower() in haystack}
+        candidate = build_candidate(item, detail, body_hits)
+        if candidate is None:
+            dropped_no_url += 1
+            continue
+        candidates.append(candidate)
+        reopened_kept.append({"bid_id": bid_id, "title": title, "gate": gate,
+                              "signals": screen["signals"]})
+
     stats.update({
         "request_time_range": f"{start.isoformat(timespec='seconds')}..{end.isoformat(timespec='seconds')}",
         "detail_calls": detail_calls,
         "dropped_no_url": dropped_no_url,
         "prefilter_dropped": prefilter_dropped[:200],
         "prefilter_dropped_count": len(prefilter_dropped),
+        "reopened_count": len(reopen),
+        "reopened_kept_count": len(reopened_kept),
+        "reopened_kept": reopened_kept[:50],
+        "reopened_dropped": reopened_dropped[:200],
         "raw_result_count": len(listings),
         "already_seen_before_detail_count": len(already_seen),
         "already_seen_before_detail": already_seen,
@@ -778,7 +838,9 @@ def main():
         print(
             f"知了标讯：{client.request_count} 次调用 / {client.cost_units:.0f} 积分，"
             f"全库命中 {stats['raw_result_count']} 条，预筛丢弃 "
-            f"{stats['prefilter_dropped_count']} 条，候选 {len(index)} 条"
+            f"{stats['prefilter_dropped_count']} 条，打开正文复核 "
+            f"{stats['reopened_count']} 条（留下 {stats['reopened_kept_count']} 条），"
+            f"候选 {len(index)} 条"
         )
         print(f"候选目录：{out_dir}")
         return 0

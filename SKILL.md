@@ -36,7 +36,7 @@ python scripts/tender_pipeline.py authorize-unattended --run-dir <检索目录>
 python scripts/tender_search.py
 ```
 
-默认最近72小时；因为接口的`pub_time`可能比实际发布日早一天，实际请求窗口会自动往前多放一天（两个窗口都记在`search_summary.json`）。适配器按 keywords.md 的85条清单自适应分批检索、对通过预筛的候选取详情正文，并把链接回源到原始站点。
+默认最近72小时；因为接口的`pub_time`可能比实际发布日早一天，实际请求窗口会自动往前多放一天（两个窗口都记在`search_summary.json`）。适配器按 keywords.md 的85条清单自适应分批检索、对通过预筛的候选取详情正文，并把链接回源到原始站点。标题与标的物无品类信号、但标的物是**检验类仪器或试剂**的公告也会取详情复核（品类信号常常只写在正文里），只有正文命中**核心词**才入队；计数见`reopened_count`/`reopened_kept_count`。
 
 **退出码 3 表示 API Key 缺失、被拒或积分不足**——那是凭证故障，不是“今天没有情报”，必须报警而不是按空结果继续。检索层任何非零退出都会写下故障摘要（`source_auth_failed`、`failure_reason`）并且**不会复用同一天早先那次的候选目录**；`prepare`遇到这样的摘要会直接拒绝排队。接口约束与实测行为见[知了标讯适配器](references/zlbx.md)。
 
