@@ -205,6 +205,9 @@ def epoch_ms(value):
 
     多维表格的日期字段收发的都是毫秒时间戳，按租户时区（Asia/Shanghai）渲染。
     载荷里的日期是本地日历日，所以按 +08 解释，否则会整体前移一天。
+
+    空值返回 None（这个字段不写），但认不出的写法一律抛错：`cell_value` 里
+    None 的语义是"不写"，认不出就返回 None 会让日期整列静默落空。
     """
     if isinstance(value, bool) or value is None:
         return None
@@ -217,10 +220,14 @@ def epoch_ms(value):
         return int(text)
     match = re.fullmatch(r"(20\d{2})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?", text)
     if not match:
-        return None
+        raise FeishuError(
+            f"日期字段值无法解析：{text!r}；只认 YYYY-MM-DD 或 YYYY-MM-DD[T ]HH:MM[:SS]")
     year, month, day, hour, minute, second = match.groups()
-    stamp = datetime(int(year), int(month), int(day),
-                     int(hour or 0), int(minute or 0), int(second or 0), tzinfo=TENANT_TZ)
+    try:
+        stamp = datetime(int(year), int(month), int(day),
+                         int(hour or 0), int(minute or 0), int(second or 0), tzinfo=TENANT_TZ)
+    except ValueError as exc:
+        raise FeishuError(f"日期字段值不是合法日期：{text!r}（{exc}）") from exc
     return int(stamp.timestamp() * 1000)
 
 

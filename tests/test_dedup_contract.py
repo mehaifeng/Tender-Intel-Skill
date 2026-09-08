@@ -17,6 +17,7 @@ from search_common import canonical_url, write_candidates, merge_source_dirs
 from tender_pipeline import (cluster_candidates, prepare, record_push, canonicalize_create,
                              resolve_semantic, PipelineError)
 from send_record import FIELDS, send_once, SendError, sha256_bytes, build_fields
+from feishu_client import FeishuError, cell_value, date_text, epoch_ms
 import fake_feishu
 from fake_feishu import FakeFeishu, ledger_row
 import zlbx_search
@@ -200,6 +201,38 @@ class PayloadToTableTests(unittest.TestCase):
         fields, dropped = self.fields(采购方式="比选")
         self.assertNotIn("采购方式", fields)
         self.assertTrue(any(d["字段"] == "采购方式" and d["值"] == "比选" for d in dropped))
+
+
+class DateColumnTests(unittest.TestCase):
+    """日期列按租户时区（+08）在毫秒与日历日之间来回，认不出的写法必须报错。"""
+
+    def test_calendar_day_is_read_back_as_the_same_day(self):
+        for text in ("2026-09-04", "2026-09-04T09:00", "2026-09-04 09:00:30"):
+            with self.subTest(text=text):
+                self.assertEqual(date_text(epoch_ms(text)), "2026-09-04")
+
+    def test_午夜前后不跨日(self):
+        # 按 UTC 解释的话 00:00 会退回前一天、23:59 会跳到后一天。
+        self.assertEqual(date_text(epoch_ms("2026-09-04T00:00")), "2026-09-04")
+        self.assertEqual(date_text(epoch_ms("2026-09-04T23:59")), "2026-09-04")
+
+    def test_timestamps_and_blanks_pass_through(self):
+        self.assertEqual(epoch_ms(1700000000000), 1700000000000)
+        self.assertEqual(epoch_ms("1700000000000"), 1700000000000)
+        for blank in (None, "", "   "):
+            self.assertIsNone(epoch_ms(blank))
+
+    def test_unparsable_date_raises_instead_of_silently_skipping(self):
+        # cell_value 里 None 的语义是"这个字段不写"，认不出就返回 None 会让
+        # 日期整列静默落空，所以这里必须抛。
+        for bad in ("2026/09/04", "2026年9月4日", "昨天", "2026-09", "2026-09-04 09"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(FeishuError):
+                    cell_value(fake_feishu.DATETIME, bad)
+
+    def test_impossible_calendar_date_raises(self):
+        with self.assertRaises(FeishuError):
+            epoch_ms("2026-13-45")
 
 
 class DeliveryContractTests(unittest.TestCase):
