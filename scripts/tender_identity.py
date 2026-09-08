@@ -56,6 +56,10 @@ def stage(value):
     family = notice_family(value)
     if family in {"更正", "结果", "终止", "合同", "意向", "资格预审"}:
         return family
+    # 澄清、补充、答疑与更正是同一回事：都在原公告发出后修订它。notice_family 只认
+    # 更正/变更，这里补齐，好让后续阶段压制（dedup_match.FOLLOWUP_PHASES）认得它们。
+    if re.search(r"澄清|补充公告|补充通知|补充说明|答疑", value):
+        return "更正"
     if re.search(r"调研|调查|参数征集|需求公示", value):
         return "意向"
     return "采购" if family else ""
@@ -65,13 +69,15 @@ def scope(value):
     """保留轮次、批次、包/标段；不删除中文数字以求相似。"""
     value = text(value)
     tokens = re.findall(
-        r"第?[一二三四五六七八九十百零〇两\d]+(?:次|批次|批|期)"
+        # 包号也可以是中文数字（「第三包」「二标段」）；漏掉它会把同一项目的不同包
+        # 当成同一条公告，字符级相似度还特别高，正是最容易误判重的写法。
+        r"第?[一二三四五六七八九十百零〇两\d]+(?:次|批次|批|期|包|标段)"
         r"|重新招标|重新采购|(?:包|标段)\s*[A-Za-z\d]+"
         r"|[A-Za-z\d]+\s*(?:包|标段)", value)
     normalized = []
     for token in tokens:
         token = re.sub(r"\s+", "", token).lower().removeprefix("第").replace("批次", "批")
-        number = re.match(r"([一二三四五六七八九十百零〇两\d]+)(次|批|期)$", token)
+        number = re.match(r"([一二三四五六七八九十百零〇两\d]+)(次|批|期|包|标段)$", token)
         if number:
             raw, kind = number.groups()
             if raw.isdigit():

@@ -22,5 +22,5 @@ __pycache__/
 data/hospitals.min.json
 data/*.bak
 
-# 跨进程锁文件；状态在 seen.json 中，锁文件不打包
+# 跨进程锁文件；台账在飞书，快照在运行目录，锁文件不打包
 *.json.lock

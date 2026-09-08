@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""校验并发送IVD Bid Radar固定16字段Webhook载荷。"""
+"""校验固定16字段载荷，并用飞书开放接口把它写成多维表格的一行。
+
+去重的唯一真相源是飞书台账本身：每次发送前重新拉一遍，用同一套漏斗再查一次重，
+确认无重复才写入。写入结果未知时**不重试**，改为按链接回查确认行到底落没落；
+仍不确定就停下来，由下一轮拉取台账自然消解，绝不盲目再写一次。
+"""
 
 import argparse
 import hashlib
@@ -8,14 +13,14 @@ import json
 import os
 import sys
 import tempfile
-import uuid
 from datetime import datetime
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
-from tender_identity import IdentityIndex, remember_aliases
-from tender_ledger import (LedgerError, ledger_lock, read_ledger, save_ledger,
-                           confirmed_index, approved_index, add_confirmed, now_iso)
+
+from dedup_match import LedgerMatcher
+from feishu_client import FeishuClient, FeishuError, cell_value
+from tender_identity import remember_aliases
+from tender_ledger import (LedgerError, append_record, fetch_ledger, ledger_lock,
+                           save_snapshot, to_record)
 
 
 FIELDS = [
@@ -23,6 +28,11 @@ FIELDS = [
     "预算", "采购方式", "科室", "命中关键词", "内容（检索的摘要）", "链接",
     "医院全名", "医院等级",
 ]
+# 载荷字段 -> 多维表格字段。其余字段两边同名。
+FIELD_ALIASES = {"科室": "科室名称", "命中关键词": "关键词命中", "内容（检索的摘要）": "内容"}
+# 原先由飞书自动化流程补的列。改走接口后由发送器自己写，否则新行会缺这些状态。
+CONSTANT_FIELDS = {"标讯来源": "AI收集", "标讯状态": "新推送", "是否已推送": True}
+TIMESTAMP_FIELDS = ("插入表格的时间", "推送时间")
 PROVINCE_LEVEL_DIVISIONS = {
     "北京", "天津", "上海", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江",
     "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南",
@@ -41,11 +51,14 @@ PROVINCE_FULL_NAMES = {
 }
 
 ROOT = Path(__file__).resolve().parent.parent
-WEBHOOK_CONFIG = ROOT / "config" / "webhook.json"
 
 
 class SendError(Exception):
     pass
+
+
+def now_iso():
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def load_json(path):
@@ -55,22 +68,6 @@ def load_json(path):
         raise SendError(f"找不到文件：{path}") from exc
     except json.JSONDecodeError as exc:
         raise SendError(f"JSON无效：{path}: {exc}") from exc
-
-
-def load_webhook_url(explicit=None):
-    """按命令行（仅DryRun）>环境变量>本地受保护配置读取Webhook。"""
-    if explicit:
-        return explicit.strip(), "命令行"
-    for name in ("FEISHU_WEBHOOK_URL", "FEISHU_CREATE_WEBHOOK_URL"):
-        value = os.environ.get(name)
-        if value:
-            return value.strip(), f"环境变量{name}"
-    if WEBHOOK_CONFIG.exists():
-        cfg = load_json(WEBHOOK_CONFIG)
-        value = (cfg.get("webhook_url") or "").strip()
-        if value and not value.startswith("填入"):
-            return value, str(WEBHOOK_CONFIG.relative_to(ROOT))
-    return "", ""
 
 
 def sha256_bytes(value):
@@ -125,6 +122,9 @@ def validate_payload(payload):
     if payload.get("命中关键词") == "null":
         # 交给业务方的这条消息必须能解释「为什么会检索到它」，说不出命中词就别发。
         errors.append("命中关键词必填，不接受null")
+    if payload.get("链接") == "null":
+        # 链接是台账里唯一 100% 覆盖的身份字段，缺了就无法回查、无法查重。
+        errors.append("链接必填，不接受null")
     province = payload.get("所属省/市")
     if province != "null" and province not in PROVINCE_LEVEL_DIVISIONS:
         errors.append("所属省/市必须是省级行政区或直辖市简称，例如北京、河北、上海、新疆")
@@ -134,6 +134,31 @@ def validate_payload(payload):
         if not expected_prefix or not location.startswith(expected_prefix):
             errors.append("地区必须以所属省份、自治区或直辖市全称开头，例如安徽省凤阳县、北京市朝阳区")
     return errors
+
+
+def build_fields(payload, schema, now_ms=None):
+    """16字段载荷 -> 多维表格写入体。空值直接不传，不再往表里写字符串 null。"""
+    now_ms = now_ms if now_ms is not None else int(datetime.now().timestamp() * 1000)
+    fields, dropped = {}, []
+    values = {FIELD_ALIASES.get(k, k): v for k, v in payload.items()}
+    values.update(CONSTANT_FIELDS)
+    for name in TIMESTAMP_FIELDS:
+        values[name] = now_ms
+    for name, raw in values.items():
+        meta = schema.get(name)
+        if meta is None:
+            dropped.append({"字段": name, "值": raw, "原因": "表中没有这个字段"})
+            continue
+        if isinstance(raw, str) and raw.strip() in {"", "null"}:
+            continue  # 空值不传，让单元格保持真正的空
+        if meta["options"] and str(raw) not in meta["options"]:
+            # 单选字段写未登记的选项会被丢掉，与其静默丢，不如留痕。
+            dropped.append({"字段": name, "值": raw, "原因": "不在该单选字段的选项里"})
+            continue
+        value = cell_value(meta["type"], raw)
+        if value is not None:
+            fields[name] = value
+    return fields, dropped
 
 
 def validate_manifest(manifest_path, payload_path, payload_sha256):
@@ -165,103 +190,98 @@ def validate_manifest(manifest_path, payload_path, payload_sha256):
     return manifest, candidate_id
 
 
-def send_once(manifest, candidate_id, payload_path, body, webhook_url, transport=None):
-    """在共享台账锁内查重、占位、发送、保存确认。未知结果不能自动重发。"""
-    from tender_pipeline import find_queue_candidate
-    transport = transport or urlopen
+def send_once(manifest, candidate_id, payload_path, body, client=None):
+    """拉最新台账、再查一次重、写入、登记。未知结果按链接回查，绝不自动重发。"""
+    from tender_pipeline import find_queue_candidate, load_semantic_decisions
     payload_path = Path(payload_path).resolve()
     payload = json.loads(body.decode("utf-8"))
-    candidate = find_queue_candidate(manifest["pipeline_dir"], candidate_id)
+    pipeline_dir = Path(manifest["pipeline_dir"])
+    candidate = find_queue_candidate(pipeline_dir, candidate_id)
     if candidate is None:
         raise SendError("本次队列没有该候选，禁止丢失公告身份后发送")
     record = dict(payload)
     remember_aliases(record, candidate)
-    seen_path = manifest["seen_path"]
-    receipt_path = Path(manifest["pipeline_dir"]) / "receipts" / f"push-{candidate_id}.json"
+    record["candidate_id"] = candidate_id
+    snapshot_path = Path(manifest["ledger_snapshot"])
+    receipt_path = pipeline_dir / "receipts" / f"push-{candidate_id}.json"
     sha = sha256_bytes(body)
-    with ledger_lock(seen_path):
-        data = read_ledger(seen_path)
-        deliveries = data.setdefault("deliveries", {})
-        # 崩溃发生在保存成功回执之后、更新共享台账之前时，凭本地确认恢复，绝不重发。
-        for attempt in deliveries.values():
-            if attempt["status"] != "pending":
-                continue
-            path = Path(attempt["receipt_path"])
-            if path.exists():
-                saved = load_json(path)
-                if (saved.get("attempt_id") == attempt["attempt_id"]
-                        and saved.get("payload_sha256") == attempt["payload_sha256"]
-                        and saved.get("http_status") == 200 and saved.get("feishu_code") == 0):
-                    add_confirmed(data, attempt["record"], confirmed_at=saved["confirmed_at"])
-                    attempt["status"] = "confirmed"
-        duplicate, reason = confirmed_index(data).find(record)
-        if duplicate is not None:
-            remember_aliases(duplicate, record)
-            save_ledger(seen_path, data)
-            # 保留真实成功回执；跨运行跳过用独立状态，不伪造 HTTP 成功。
+    client = client or FeishuClient()
+
+    with ledger_lock(snapshot_path):
+        # 发送前必须看最新台账：本地快照可能落后于别人刚加的行。
+        ledger = fetch_ledger(client)
+        save_snapshot(snapshot_path, ledger)
+        matcher = LedgerMatcher(ledger["records"], load_semantic_decisions(pipeline_dir))
+        match = matcher.check(record)
+        if match.verdict == "duplicate":
             if not receipt_path.exists():
                 atomic_write_json(receipt_path, {
-                    "schema_version": 3, "flow": "push", "candidate_id": candidate_id,
+                    "schema_version": 4, "flow": "push", "candidate_id": candidate_id,
                     "payload_path": str(payload_path), "payload_sha256": sha,
-                    "delivery_status": "already_seen", "reason": reason,
+                    "delivery_status": "already_seen", "reason": match.reason,
+                    "match_layer": match.layer,
+                    "matched_feishu_id": (match.matched or {}).get("_feishu_id"),
                     "checked_at": now_iso(),
                 })
-            return {"sent": False, "already_seen": True, "reason": reason, "receipt": str(receipt_path)}
-        possible, reason = confirmed_index(data).possible(record)
-        if possible is not None and approved_index(data).find(record)[0] is None:
-            save_ledger(seen_path, data)
+            return {"sent": False, "already_seen": True, "reason": match.reason,
+                    "match_layer": match.layer, "receipt": str(receipt_path)}
+        if match.verdict == "semantic":
             raise SendError(
-                "疑似已入账，尚未发送：" + reason
-                + "；核对飞书后用 tender_pipeline.py resolve-review 登记结论"
+                "与台账存在需要语义判定的相似公告，尚未发送："
+                + "、".join(p.ledger.get("_feishu_id", "") for p in match.pairs)
+                + "；先用 tender_pipeline.py resolve-semantic 登记结论"
             )
-        pending, _ = IdentityIndex(a["record"] for a in deliveries.values()
-                                   if a["status"] == "pending").find(record)
-        if pending is not None:
-            save_ledger(seen_path, data)
-            raise SendError("该公告有未确认的发送尝试，已阻止重发；核对飞书后用 resolve-delivery 登记结果")
-        attempt_id = uuid.uuid4().hex
-        attempt = {
-            "attempt_id": attempt_id, "status": "pending", "started_at": now_iso(),
-            "record": record, "payload_sha256": sha, "receipt_path": str(receipt_path),
-        }
-        deliveries[attempt_id] = attempt
-        save_ledger(seen_path, data)  # 网络请求之前持久化；此后任何未知响应都保留 pending。
-        request = Request(webhook_url, data=body, method="POST",
-                          headers={"Content-Type": "application/json; charset=utf-8"})
+
+        fields, dropped = build_fields(payload, client.fields())
         try:
-            with transport(request, timeout=30) as response:
-                status = response.status
-                response_json = json.loads(response.read().decode("utf-8"))
-            if status != 200 or type(response_json.get("code")) is not int or response_json["code"] != 0:
-                raise SendError("飞书未确认 HTTP 200 / code 0，已保留发送占位")
-        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
-            raise SendError("发送结果未知，已保留发送占位；核对飞书后再处理，不自动重发") from exc
+            created = client.create_record(fields)
+        except FeishuError as exc:
+            # 结果未知：行可能已经写进去了。按链接回查，回查不出来也不重试。
+            recovered = None
+            try:
+                found = client.find_by_url(payload["链接"])
+                recovered = found[0] if found else None
+            except FeishuError:
+                recovered = None
+            if recovered is None:
+                raise SendError(
+                    f"写入结果未知且回查未找到该链接，已停止且未重试：{exc}；"
+                    "下一轮拉取台账会自然消解，不要手工重发"
+                ) from exc
+            created = recovered
+
+        record_id = created.get("record_id", "")
+        if not record_id:
+            raise SendError("飞书未返回 record_id，无法确认写入结果")
+        stored = to_record({"record_id": record_id, "fields": created.get("fields") or fields})
+        # create 返回体可能不带自动编号；至少保证身份字段可用于同批后续查重。
+        stored["标题"] = stored["标题"] or payload["标题"]
+        stored["链接"] = stored["链接"] or payload["链接"]
         receipt = {
-            "schema_version": 3, "flow": "push", "candidate_id": candidate_id,
+            "schema_version": 4, "flow": "push", "candidate_id": candidate_id,
             "payload_path": str(payload_path), "payload_sha256": sha,
-            "http_status": 200, "feishu_code": 0, "confirmed_at": now_iso(),
-            "attempt_id": attempt_id,
+            "http_status": 200, "feishu_code": 0,
+            "feishu_record_id": record_id, "feishu_id": stored.get("_feishu_id", ""),
+            "dropped_fields": dropped, "written_field_count": len(fields),
+            "confirmed_at": now_iso(),
         }
         atomic_write_json(receipt_path, receipt)
-        add_confirmed(data, payload, candidate, receipt["confirmed_at"])
-        attempt["status"] = "confirmed"
-        attempt["confirmed_at"] = receipt["confirmed_at"]
-        save_ledger(seen_path, data)
-        return {"sent": True, "http_status": 200, "feishu_code": 0, "receipt": str(receipt_path)}
+
+    append_record(snapshot_path, stored)
+    return {"sent": True, "feishu_record_id": record_id, "feishu_id": stored.get("_feishu_id", ""),
+            "dropped_fields": dropped, "receipt": str(receipt_path)}
 
 
 def main():
     # DryRun 会把整条载荷打回控制台。Windows 控制台默认 GBK，公告正文里的零宽连接符
     # （U+200D）这类字符直接抛 UnicodeEncodeError，把 SKILL 规定的推送前离线校验卡死。
-    # 与 zlbx_search.py / tender_search.py 同一处置：先把两条流切到 UTF-8。
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
-    parser = argparse.ArgumentParser(description="发送固定16字段IVD Bid Radar Webhook载荷")
+    parser = argparse.ArgumentParser(description="校验并用飞书接口写入固定16字段记录")
     parser.add_argument("--payload", required=True)
     parser.add_argument("--manifest")
-    parser.add_argument("--webhook-url", help="仅DryRun可显式传入；Live使用环境变量或config/webhook.json")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--live", action="store_true")
@@ -276,32 +296,31 @@ def main():
         body = payload_path.read_bytes()
         payload_sha256 = sha256_bytes(body)
 
-        webhook_url, webhook_source = load_webhook_url(args.webhook_url)
-
         if args.dry_run:
+            configured = True
+            detail = {}
+            try:
+                client = FeishuClient()
+                fields, dropped = build_fields(payload, client.fields())
+                detail = {"table_fields": len(fields), "dropped_fields": dropped,
+                          "omitted_null_fields": sorted(
+                              k for k, v in payload.items() if v == "null")}
+            except FeishuError as exc:
+                configured = False
+                detail = {"feishu_error": str(exc)}
             print(json.dumps({
-                "valid": True,
-                "sent": False,
-                "field_count": len(payload),
-                "bytes": len(body),
-                "webhook_configured": bool(webhook_url),
-                "webhook_source": webhook_source or "未配置",
-                "payload": payload,
+                "valid": True, "sent": False, "field_count": len(payload), "bytes": len(body),
+                "feishu_configured": configured, **detail, "payload": payload,
             }, ensure_ascii=False, indent=2))
             return 0
 
-        if args.webhook_url:
-            raise SendError("Live模式不接受命令行Webhook URL，必须使用环境变量或受保护的本地配置")
         if not args.manifest:
             raise SendError("Live模式必须提供--manifest")
         manifest, candidate_id = validate_manifest(args.manifest, payload_path, payload_sha256)
-        if not webhook_url:
-            raise SendError("未配置Webhook；请设置环境变量或config/webhook.json")
-
-        result = send_once(manifest, candidate_id, payload_path, body, webhook_url)
+        result = send_once(manifest, candidate_id, payload_path, body)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
-    except (SendError, LedgerError) as exc:
+    except (SendError, LedgerError, FeishuError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
 

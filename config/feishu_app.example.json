@@ -1,0 +1,9 @@
+{
+  "_说明": "复制为config/feishu_app.json并填入飞书自建应用凭据与目标多维表格。该文件已在.gitignore中，不会被提交；环境变量FEISHU_APP_ID、FEISHU_APP_SECRET、FEISHU_APP_TOKEN、FEISHU_TABLE_ID优先。",
+  "_权限": "应用需开通 bitable:app（读写多维表格），并在目标多维表格里通过「添加文档应用」把该应用加为协作者，否则接口返回权限错误。",
+  "_app_token": "多维表格地址 https://<租户>.feishu.cn/base/<app_token>?table=<table_id> 里 /base/ 后面那一段。",
+  "app_id": "cli_xxxxxxxxxxxxxxxx",
+  "app_secret": "填入应用凭据",
+  "app_token": "填入多维表格app_token",
+  "table_id": "tblxxxxxxxxxxxxxx"
+}

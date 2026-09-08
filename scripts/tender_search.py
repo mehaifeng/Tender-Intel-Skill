@@ -12,7 +12,9 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from feishu_client import FeishuError
 from search_common import merge_source_dirs, write_candidates
+from tender_ledger import LedgerError, fetch_ledger, save_snapshot, snapshot_path
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,7 +24,7 @@ SCRIPTS = ROOT / "scripts"
 AUTH_ERROR_EXIT_CODE = 3
 
 
-def build_command(args, source_dir):
+def build_command(args, source_dir, ledger_snapshot=None):
     command = [
         sys.executable, str(SCRIPTS / "zlbx_search.py"),
         "--time-range", args.time_range,
@@ -34,8 +36,8 @@ def build_command(args, source_dir):
     ]
     if args.queries:
         command.extend(["--queries", args.queries])
-    if getattr(args, "seen", None):
-        command.extend(["--seen", args.seen])
+    if ledger_snapshot:
+        command.extend(["--ledger-snapshot", str(ledger_snapshot)])
     if args.dry_run:
         command.append("--dry-run")
     return command
@@ -54,7 +56,6 @@ def main():
     parser.add_argument("--page-size", type=int, default=50)
     parser.add_argument("--max-details", type=int, default=60)
     parser.add_argument("--delay", type=float, default=0.25)
-    parser.add_argument("--seen", default=str(ROOT / "data/seen.json"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -62,10 +63,31 @@ def main():
     source_dir = out_dir / ".sources" / "zlbx"
     source_dir.mkdir(parents=True, exist_ok=True)
 
+    # 台账快照放在统一目录，检索预筛与 prepare 用同一份，整轮口径一致。
+    ledger_snapshot = None
+    if not args.dry_run:
+        try:
+            ledger = fetch_ledger()
+        except (LedgerError, FeishuError) as exc:
+            # 拉不到台账就无法判重。这类故障同样长得像「今天没情报」，必须留下摘要，
+            # 让 prepare 拒绝在这个目录上排队，而不是按空台账把历史公告再发一遍。
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "search_summary.json").write_text(json.dumps({
+                "schema_version": 3, "run_date": date.today().isoformat(),
+                "time_range": args.time_range, "source": "zlbx", "exit_code": 2,
+                "source_auth_failed": False, "ledger_fetch_failed": True,
+                "candidate_count": 0, "failure_reason": str(exc)[-2000:],
+            }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            print(f"错误：{exc}", file=sys.stderr)
+            return 2
+        ledger_snapshot = snapshot_path(out_dir)
+        save_snapshot(ledger_snapshot, ledger)
+        print(f"飞书台账：{ledger['row_count']} 行，拉取于 {ledger['fetched_at']}")
+
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     completed = subprocess.run(
-        build_command(args, source_dir),
+        build_command(args, source_dir, ledger_snapshot),
         cwd=ROOT, env=env, text=True, encoding="utf-8", errors="replace", capture_output=True,
     )
     if completed.stdout.strip():

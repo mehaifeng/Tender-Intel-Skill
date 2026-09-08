@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from send_webhook import FIELDS, validate_payload  # noqa: E402
+from send_record import FIELDS, validate_payload  # noqa: E402
 from tender_pipeline import (  # noqa: E402
     extract_departments,
     matched_query_keywords,
