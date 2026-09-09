@@ -395,3 +395,109 @@ class AggregateNoticeTests(unittest.TestCase):
         ):
             with self.subTest(title=title[:16]):
                 self.assertEqual(aggregate_notice(title, text), "")
+
+
+class AttachmentSignalTests(unittest.TestCase):
+    """品类信号只写在附件里时，管线要靠信源解析好的附件文本放行并说明来由。
+
+    定标用例是 2026-09-09 复盘 9.7-9.8 漏标查出来的两条：茂名电白与桂林中医的正文
+    都只有报名须知，标的清单在 .xls 里，而知了早就把它解析进 `source_ext` 随详情
+    一并回传——积分付过了，只是没人读。
+    """
+
+    # html_to_text 处理过的样子：源是 <td> 表格，一格一行（见 test_zlbx_search）。
+    ATTACHMENT = ("1.Sheet1 新增医用耗材项目内容及需求\n序号\n名称\n用途及要求\n"
+                  "3\n传送导管\n心脏起搏器电极导线3830的专用输送鞘管。\n"
+                  "4\n过敏原特异性IgE抗体检测试剂盒\n"
+                  "用于定性检测人血清样本中的过敏原特异性IgE抗体。检测项目：螨、艾蒿、猫毛皮屑")
+
+    def prepare_one(self, attachment_text):
+        import json
+        import tempfile
+        from tender_ledger import fetch_ledger, save_snapshot, snapshot_path
+        from search_common import write_candidates
+        from tender_pipeline import prepare
+        sys.path.insert(0, str(ROOT / "tests"))
+        import fake_feishu
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        run = Path(tmp.name) / "run"
+        write_candidates([{
+            "bid_id": "603050877",
+            "title": "茂名市电白区人民医院新增医用耗材采购需求信息公告",
+            "url": "https://www.mmdbrmyy.com/newsview.aspx?id=1444",
+            "publish_time": "2026-09-07", "source": "zlbx",
+            "summary": "医用耗材",
+            "content": "二、项目内容及需求：新增医用耗材项目内容及需求.xls 三、供应商资格条件",
+            "product_list": "医用耗材",
+            "attachment_text": attachment_text,
+            "content_access": "public_full", "retrieval_verified": True,
+            "source_fields": {"单位": "茂名市电白区人民医院", "所属省/市": "广东"},
+        }], run, "2026-09-09")
+        save_snapshot(snapshot_path(run), fetch_ledger(fake_feishu.client([])[0]))
+        pipeline, manifest = prepare(run, 10, "report-only")
+        queue = [json.loads(line) for line
+                 in (pipeline / "queue.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+        screened = [json.loads(line) for line
+                    in (pipeline / "screened_out.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+        return manifest, queue, screened
+
+    def test_attachment_only_signal_reaches_the_queue(self):
+        manifest, queue, _ = self.prepare_one(self.ATTACHMENT)
+        self.assertEqual(manifest["counts"]["queued"], 1)
+        evidence = queue[0]["search_evidence"]
+        self.assertIn("过敏/IgE", evidence["target_category_signals"])
+        # 核实阶段照正文回找会是空结果，必须先告诉它这不是矛盾。
+        self.assertTrue(evidence["signal_only_in_attachment"])
+        self.assertEqual(manifest["counts"]["queued_signal_only_in_attachment"], 1)
+        # 命中关键词取公告原文写法：附件单元格里的完整品名要赢过「过敏」这种检索片段。
+        self.assertTrue(
+            any(k.startswith("过敏原特异性IgE抗体") for k in evidence["matched_keywords"]),
+            evidence["matched_keywords"])
+
+    def test_without_the_attachment_the_same_notice_is_screened_out(self):
+        manifest, _, screened = self.prepare_one("")
+        self.assertEqual(manifest["counts"]["queued"], 0)
+        self.assertEqual(len(screened), 1)
+        self.assertIn("无目标品类信号", screened[0]["skip_reason"])
+
+    def test_signal_visible_in_the_body_is_not_flagged_as_attachment_only(self):
+        """正文自己就写着品类时不打标记，否则这个提示会失去意义。"""
+        import json
+        import tempfile
+        from tender_ledger import fetch_ledger, save_snapshot, snapshot_path
+        from search_common import write_candidates
+        from tender_pipeline import prepare
+        sys.path.insert(0, str(ROOT / "tests"))
+        import fake_feishu
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        run = Path(tmp.name) / "run"
+        write_candidates([{
+            "bid_id": "1", "title": "某医院过敏原检测试剂采购公告",
+            "url": "https://example.gov.cn/a", "publish_time": "2026-09-07",
+            "source": "zlbx", "summary": "过敏原特异性IgE抗体检测试剂盒",
+            "content": "本项目采购过敏原特异性IgE抗体检测试剂盒。",
+            "attachment_text": self.ATTACHMENT,
+            "content_access": "public_full", "retrieval_verified": True,
+            "source_fields": {"单位": "某医院"},
+        }], run, "2026-09-09")
+        save_snapshot(snapshot_path(run), fetch_ledger(fake_feishu.client([])[0]))
+        pipeline, manifest = prepare(run, 10, "report-only")
+        queue = [json.loads(line) for line
+                 in (pipeline / "queue.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertEqual(manifest["counts"]["queued"], 1)
+        self.assertFalse(queue[0]["search_evidence"]["signal_only_in_attachment"])
+        self.assertEqual(manifest["counts"]["queued_signal_only_in_attachment"], 0)
+
+    def test_hospital_names_in_the_attachment_do_not_forge_a_digest_page(self):
+        """附件里的业绩表、参考发票表常列一串医院名，那不代表这一页覆盖多家采购人。"""
+        roster = "\n".join(
+            f"参考业绩 {city}市第一人民医院"
+            for city in ("北京", "上海", "广州", "深圳", "杭州",
+                         "南京", "武汉", "成都", "西安", "长沙"))
+        manifest, queue, _ = self.prepare_one(self.ATTACHMENT + "\n" + roster)
+        self.assertEqual(manifest["counts"]["queued"], 1)
+        self.assertEqual(queue[0]["search_evidence"]["aggregate_notice"], "")

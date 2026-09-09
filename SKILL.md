@@ -36,7 +36,7 @@ python scripts/tender_pipeline.py authorize-unattended --run-dir <检索目录>
 python scripts/tender_search.py
 ```
 
-默认最近72小时；因为接口的`pub_time`可能比实际发布日早一天，实际请求窗口会自动往前多放一天（两个窗口都记在`search_summary.json`）。适配器按 keywords.md 的91条清单自适应分批检索、对通过预筛的候选取详情正文，并把链接回源到原始站点。标题与标的物无品类信号、但标的物是**检验类仪器或试剂**的公告也会取详情复核（品类信号常常只写在正文里），只有正文命中**核心词**才入队；计数见`reopened_count`/`reopened_kept_count`。
+默认最近72小时；因为接口的`pub_time`可能比实际发布日早一天，实际请求窗口会自动往前多放一天（两个窗口都记在`search_summary.json`）。适配器按 keywords.md 的91条清单自适应分批检索、对通过预筛的候选取详情正文，并把链接回源到原始站点。标题与标的物无品类信号的公告，满足四种情形之一时也会取详情复核（品类信号常常只写在正文或附件里）：标的是**检验类仪器或试剂**；或者采购人像医疗机构、买的是**耗材器械**、**成批设备仪器**、或者是**前期公告**（调研/论证/需求公示/意向/遴选/询价/比选/磋商）。后两种情形排除明显别域（交换机、复印纸、物业、等级保护这类）。只有正文命中**核心词**才入队；计数见`reopened_count`/`reopened_kept_count`。**详情返回的附件解析文本（知了的`source_ext`）与正文同属正文域**——「详见附件」那类公告的标的清单只在这里，它随详情调用一起返回、不另计费。
 
 **退出码 3 表示 API Key 缺失、被拒或积分不足**——那是凭证故障，不是“今天没有情报”，必须报警而不是按空结果继续。检索层任何非零退出都会写下故障摘要（`source_auth_failed`、`failure_reason`）并且**不会复用同一天早先那次的候选目录**；`prepare`遇到这样的摘要会直接拒绝排队。接口约束与实测行为见[知了标讯适配器](references/zlbx.md)。
 
@@ -83,7 +83,7 @@ python scripts/tender_pipeline.py status --run-dir <检索目录>
 python scripts/tender_pipeline.py next-batch --run-dir <检索目录>
 ```
 
-读取当前批次后按[核验协议](references/verification.md)处理。候选的`retrieval_verified: true`（`content_access: public_full`）表示适配器已保存完整正文，**不必打开链接**；`public_partial`表示正文只是个壳（写着「查看原文」或把内容指向附件，原因见`content_access_reason`），知了的检索覆盖附件，**正文里没写不等于没有**，证据不足输出`manual`而不是`exclude`；`metadata_only`表示详情没取到，只有标题与结构化字段可用。
+读取当前批次后按[核验协议](references/verification.md)处理。候选的`retrieval_verified: true`（`content_access: public_full`）表示适配器已保存完整正文，**不必打开链接**；`public_partial`表示正文只是个壳（写着「查看原文」或把内容指向附件，原因见`content_access_reason`），知了的检索覆盖附件，**正文里没写不等于没有**，证据不足输出`manual`而不是`exclude`；`metadata_only`表示详情没取到，只有标题与结构化字段可用。`search_evidence.signal_only_in_attachment`为true时，品类信号只写在附件解析文本里，**照正文回找是空结果属于正常**，不得据此判`exclude`。
 
 **十六字段里只有`科室`需要你可能补充。** 项目编号、单位、地区、所属省/市、截止时间、预算、采购方式由管线从知了标讯的结构化字段直接绑定（`SOURCE_BOUND_FIELDS`），标题、发布时间、命中关键词、摘要、链接同样由管线绑定，医院全名与等级来自本地索引。接口值明显有误时可以覆盖，但**必须在`field_evidence`里给出该字段的正文证据**，否则覆盖不生效。
 

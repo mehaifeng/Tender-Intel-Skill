@@ -13,6 +13,7 @@ from search_common import (  # noqa: E402
     screen_domain,
     merge_source_dirs,
     non_hospital_buyer,
+    reopen_reason,
     zlbx_bid_id,
     signal_tier,
     target_category_signals,
@@ -183,6 +184,62 @@ class BuyerAndNoticeGateTests(unittest.TestCase):
             self.assertEqual(procedural_notice(title), "", title)
 
 
+class ReopenGateTests(unittest.TestCase):
+    """二次机会的门：只决定花不花那 1 积分，留不留仍由正文与附件的核心词说了算。"""
+
+    def test_lab_items_and_supply_lots_still_open(self):
+        """原有两条分支不受放宽影响。"""
+        self.assertEqual(reopen_reason("某院全自动化学发光分析仪采购", "分析仪", ""), "分析仪")
+        self.assertEqual(
+            reopen_reason("反角手机等一批耗材器械遴选公告", "反角手机", "赣南医科大学第三附属医院"),
+            "耗材")
+
+    def test_hospital_equipment_lot_opens(self):
+        """「医疗设备一批」的清单同样只在附件里，里头可能就有配我们试剂的分析仪。"""
+        self.assertEqual(
+            reopen_reason("宜宾市第四人民医院医疗设备一批招标公告", "医疗设备",
+                          "宜宾市第四人民医院"), "设备")
+
+    def test_early_stage_notice_opens_even_without_the_word_equipment(self):
+        """定标用例：桂林市中医医院那条，标的物就是项目名，连「设备」两个字都没有。
+
+        附件第 38 项写着 `全自动化学发光免疫分析仪（过敏原检测）`。
+        """
+        self.assertEqual(
+            reopen_reason("关于桂林市中医医院病房能力提升项目市场调研服务采购公告",
+                          "病房能力提升项目市场调研服务", "桂林市中医医院"), "市场调研")
+
+    def test_off_domain_purchases_stay_shut(self):
+        """医院也买交换机和复印纸，开了也是白花积分。"""
+        for title, products in (
+            ("【市场调研】广州市白云区人民医院交换机采购项目市场调研公告", "交换机"),
+            ("复旦大学附属金山医院2027年硒鼓等，复印纸，印刷品调研公示", "硒鼓 复印纸"),
+            ("惠州市中医医院网络安全等级保护测评服务项目市场调研公告", "等级保护测评服务"),
+            ("湘潭市中心医院智能域名解析设备DDI采购项目议价公告", "域名解析设备"),
+            ("某院护理管理系统维保项目的公开遴选公告", "护理管理系统维保"),
+        ):
+            with self.subTest(title=title[:20]):
+                self.assertEqual(reopen_reason(title, products, "某某医院"), "")
+
+    def test_off_domain_filter_never_touches_the_original_branches(self):
+        """标的已经点名检验试剂/耗材时，别域词不得把它关在门外。
+
+        「检验科信息系统及试剂采购」这类混合包，`信息系统` 命中别域词，但
+        `试剂` 已经说明值得打开——原有两条分支在别域过滤之前判定。
+        """
+        self.assertEqual(
+            reopen_reason("某院检验科信息系统及配套试剂采购项目", "信息系统 试剂", "某院"),
+            "试剂")
+        self.assertEqual(
+            reopen_reason("某院信息化改造配套医用耗材采购", "信息化 耗材", "某医院"), "耗材")
+
+    def test_non_medical_buyer_gets_neither_new_branch(self):
+        for buyer in ("某市公安局刑侦支队", "某县教育局", ""):
+            with self.subTest(buyer=buyer):
+                self.assertEqual(
+                    reopen_reason("一批设备采购项目市场调研公告", "设备", buyer), "")
+
+
 class SignalTierTests(unittest.TestCase):
     """分层只用于调整核实力度，绝不决定去留——宽片段捞回的印迹仪标已经应标过。"""
 
@@ -262,6 +319,44 @@ class SearchMergeTests(unittest.TestCase):
             self.assertIn("自身抗体", merged[0]["content"])
             self.assertEqual(merged[0]["content_access"], "public_full")
             self.assertEqual(len(merged[0]["alternate_sources"]), 1)
+
+    def test_parsed_attachment_survives_write_and_merge(self):
+        """附件解析文本要一路带到统一层，否则 prepare 那道预筛照样看不到品类。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "zlbx"
+            write_candidates([{
+                "bid_id": "603050877", "title": "某医院新增医用耗材采购需求信息公告",
+                "url": "https://example.test/a", "source": "zlbx",
+                "summary": "医用耗材", "content": "二、项目内容及需求：需求.xls",
+                "attachment_text": "4 过敏原特异性IgE抗体检测试剂盒",
+                "content_access": "public_full",
+            }], source, "2026-09-09")
+            merged = merge_source_dirs([source])
+            self.assertEqual(merged[0]["attachment_text"], "4 过敏原特异性IgE抗体检测试剂盒")
+
+    def test_attachment_is_taken_from_whichever_copy_has_it(self):
+        """壳与完整记录按正文长度分胜负，附件却可能只挂在输的那一份上。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "zlbx"
+            write_candidates([
+                {
+                    "bid_id": "603129498", "title": "东营市中医院新增医用耗材一批采购项目遴选公告",
+                    "url": "https://ctbpsp.com/#/bulletinDetail?uuid=abc",
+                    "source": "zlbx", "summary": "", "content": "完整信息请查看原文",
+                    "attachment_text": "过敏原特异性IgE抗体检测试剂",
+                    "content_access": "metadata_only",
+                },
+                {
+                    "bid_id": "603129498", "title": "东营市中医院新增医用耗材一批采购项目遴选公告",
+                    "url": "https://dyszyy.com.cn/list_39/1885.html",
+                    "source": "zlbx", "summary": "", "content": "公告正文" * 500,
+                    "attachment_text": "", "content_access": "public_full",
+                },
+            ], source, "2026-09-09")
+            merged = merge_source_dirs([source])
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["content_access"], "public_full")
+            self.assertEqual(merged[0]["attachment_text"], "过敏原特异性IgE抗体检测试剂")
 
     def test_same_project_different_notice_stage_is_not_merged(self):
         with tempfile.TemporaryDirectory() as tmp:

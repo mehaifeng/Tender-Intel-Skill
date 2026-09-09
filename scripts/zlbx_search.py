@@ -517,11 +517,18 @@ def fetch_detail(client, item):
 
 def html_to_text(value):
     text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", str(value or ""))
-    text = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>", "\n", text)
+    # 单元格边界要留住：`</td>` 塌成空格之后，`<td>4</td><td>过敏原特异性IgE抗体
+    # 检测试剂盒</td><td>用于定性检测…</td>` 会连成一条 40 多字的长句，
+    # `matched_query_keywords` 的段落上限吃不下，「命中关键词」就只剩「过敏」这种
+    # 碎片，而业务方要的正是单元格里那个完整品名。
+    text = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>|</t[dh]>", "\n", text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = (text.replace("&nbsp;", " ").replace("&amp;", "&")
                 .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"'))
     text = re.sub(r"[ \t　]+", " ", text)
+    # 被剥掉的标签会在行首行尾留下空格，行本身就是单元格边界，留着只会让
+    # 按段落取「完整写法」时多带一个空格。
+    text = re.sub(r"[ \t　]*\n[ \t　]*", "\n", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -530,6 +537,7 @@ def build_candidate(item, detail, query_hits):
     title = _clean(item.get("title")) or _clean((detail or {}).get("title"))
     detail = detail or {}
     body = html_to_text(detail.get("source"))
+    attachment_text = html_to_text(detail.get("source_ext"))
     access, access_reason = body_completeness(body)
     products = product_list_of(item) or product_list_of(detail)
     fields = source_fields_from(item)
@@ -565,6 +573,14 @@ def build_candidate(item, detail, query_hits):
         "publish_time": _clean(item.get("pub_time")) or _clean(detail.get("pub_time")),
         "summary": summary,
         "content": body,
+        # 知了入库时把附件（xls/doc）解析成表格文本放进 `source_ext`，随详情一起
+        # 返回、不另计费。正文写「详见附件」时，标的清单只在这里——2026-09-09 复盘
+        # 9.7-9.8 漏标，茂名电白（`过敏原特异性IgE抗体检测试剂盒`）和桂林中医
+        # （`38 全自动化学发光免疫分析仪（过敏原检测）`）两条的信号逐字就在里面，
+        # 详情早就付过费，只是没人读。
+        # **不并进 `content`**：`body_completeness` 与 `_extract_deadline` 判的是
+        # 「正文本身取到没有」，把附件表格灌进去会让壳正文伪装成完整正文。
+        "attachment_text": attachment_text,
         "product_list": products,
         "source_fields": fields,
         "field_evidence": evidence,
@@ -706,8 +722,11 @@ def collect(client, queries, start, end, batch_size, page_size, max_details, led
                                      "reason": f"详情获取失败：{exc}"})
             continue
         body = html_to_text(detail.get("source"))
+        # 附件解析文本与正文同属正文域：这道门要判的就是「品类信号是不是只写在
+        # 正文/附件里」，把已经拿到手的 source_ext 排除在外等于门只开了一半。
+        attachment_text = html_to_text(detail.get("source_ext"))
         products = product_list_of(item) or product_list_of(detail)
-        screen = screen_domain(title, "\n".join(filter(None, (products, body))))
+        screen = screen_domain(title, "\n".join(filter(None, (products, body, attachment_text))))
         tier = signal_tier(screen["signals"])
         # 只有核心词才放行：宽片段（印迹/风湿/细胞因子/25羟基维生素D）在几十行的
         # 科室设备清单里几乎必然出现一次，靠它放行等于把这道门变成全量取详情。
@@ -718,7 +737,8 @@ def collect(client, queries, start, end, batch_size, page_size, max_details, led
             })
             continue
         # 命中归因要重算：这些词本来就只出现在正文里，列表层那次回推必然是空的。
-        haystack = "\n".join((title, products, body, _clean(item.get("caller_name")))).lower()
+        haystack = "\n".join((title, products, body, attachment_text,
+                              _clean(item.get("caller_name")))).lower()
         body_hits = {(number, word) for number, word in numbered if word.lower() in haystack}
         candidate = build_candidate(item, detail, body_hits)
         if candidate is None:
