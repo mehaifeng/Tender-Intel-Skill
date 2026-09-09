@@ -170,21 +170,59 @@ MEDICAL_BUYER_HINT = re.compile(
 # 具体到哪几样只在正文的明细表里。2026-09-07 漏掉的赣南医大三附院那条就是这样
 # ——`抗核抗体谱（IgG）检测试剂` 只出现在详情的表格里。
 SUPPLY_TERMS = re.compile(r"耗材|器械")
+# 医疗机构成批买设备。「医疗设备一批」「设备购置项目」这类标的物清单同样只写项目名，
+# 具体买什么在附件明细表里，而那张表里完全可能有一台配我们试剂的分析仪。
+DEVICE_TERMS = re.compile(r"设备|仪器")
+# 前期公告：市场调研、论证、需求公示、意向、遴选、询价、比选、磋商。
+# 这类公告的 `sm_names` 常常就是项目名本身（`病房能力提升项目市场调研服务`），
+# 连「设备」两个字都没有，清单整份在附件里。2026-09-09 复盘的桂林市中医医院那条
+# 就是这样：附件第 38 项写着 `全自动化学发光免疫分析仪（过敏原检测）`。
+EARLY_STAGE_TERMS = re.compile(
+    r"市场调研|调研|论证|需求(?:调查|征集|公示|信息)|意向|遴选|询价|比选|磋商"
+)
+# 医院也买交换机、复印纸和物业服务。这些别域里**不可能**出现检验试剂或分析仪，
+# 放它们进来只是白花积分——所以只在上面两条放宽的分支上生效，不碰原有的
+# 检验类仪器/试剂与耗材器械两道门（那两道门本身已经点名了标的）。
+# 放错的代价是 1 积分，漏掉的代价是一条标，所以只收「肯定不是」的域。
+OFF_DOMAIN_TERMS = re.compile(
+    r"信息(?:系统|化)|软件|网络|交换机|域名|等级保护|商用密码|数据中心|机房"
+    r"|运维|维保|维修|保养|物业|保洁|绿化|安保|食堂|餐饮|被服|洗涤"
+    r"|印刷|硒鼓|复印纸|文具|图书|办公(?:设备|用品|家具)|电脑|打印|腕带|识别带"
+    r"|救护车|担架|保险|电梯|空调|监控|档案|培训|会议|设计|监理|造价"
+    r"|外送|外检|体检|标识|标牌|导视|停车|窗帘|门禁|心理测评|量表"
+)
 
 
 def reopen_reason(title, product_list, buyer=""):
     """判定这条公告值不值得花 1 积分打开正文；不值得返回空串。
 
-    两种值得：标的物/标题里有检验类仪器或试剂；或者采购人像医疗机构、买的是
-    耗材器械——两种情况下品类信号都可能只写在正文里，而列表层看不到正文。
+    四种值得，共同点都是「品类信号可能只写在正文或附件里，而列表层两者都看不到」：
+
+    1. 标的物/标题里有**检验类仪器或试剂**；
+    2. 采购人像医疗机构、买的是**耗材器械**；
+    3. 医疗机构**成批买设备/仪器**；
+    4. 医疗机构的**前期公告**（调研/论证/需求公示/意向/遴选/询价/比选/磋商）。
+
+    后两条是 2026-09-09 加的，且只对**不在明显别域**的标的生效——医院也买交换机和
+    复印纸，那些开了也是白开。留不留仍由正文与附件里的核心词说了算，这道门只管花不花
+    那 1 积分。
     """
     term = lab_item_term(title, product_list)
     if term:
         return term
-    if MEDICAL_BUYER_HINT.search(buyer or "") and SUPPLY_TERMS.search(
-            "\n".join(t for t in (title, product_list) if t)):
-        return SUPPLY_TERMS.search("\n".join(t for t in (title, product_list) if t)).group(0)
-    return ""
+    text = "\n".join(t for t in (title, product_list) if t)
+    if not MEDICAL_BUYER_HINT.search(buyer or ""):
+        return ""
+    supply = SUPPLY_TERMS.search(text)
+    if supply:
+        return supply.group(0)
+    if OFF_DOMAIN_TERMS.search(text):
+        return ""
+    device = DEVICE_TERMS.search(text)
+    if device:
+        return device.group(0)
+    early = EARLY_STAGE_TERMS.search(text)
+    return early.group(0) if early else ""
 
 
 # 标题里的并列分隔符。`和` 不收：中文地名与项目名里到处是它（和田地区、和美乡村），
@@ -574,6 +612,9 @@ def write_candidates(candidates, out_dir, run_date):
             "source_url": url,
             "summary": item.get("summary") or "",
             "content": item.get("content") or "",
+            # 信源替我们解析好的附件文本（知了的 source_ext）。正文写「详见附件」时
+            # 标的清单只在这里，且随详情调用一起返回、不另计费；不落盘就等于白付。
+            "attachment_text": item.get("attachment_text") or "",
             # 来源自带的标的清单（知了的 sm_names + brand_names）。正文写「详见附件」
             # 「下载」时，这是唯一能定品类的字段——不落盘统一层就只能看到一篇没有清单的公告。
             "product_list": item.get("product_list") or "",
@@ -720,6 +761,13 @@ def merge_source_dirs(source_dirs):
             "rank_score": primary_candidate.get("rank_score"),
             "summary": primary_content.get("summary") or "",
             "content": primary_content.get("content") or "",
+            # 附件文本不跟着代表走：壳记录与完整记录按正文长度分胜负，附件却可能只
+            # 挂在输的那一份上。同一条公告的附件是同一批，取第一个非空的即可。
+            # `members` 已按 _preference 排过序，代表在最前，所以这就是「代表优先，
+            # 代表没有就用别的记录的」。
+            "attachment_text": next(
+                (content.get("attachment_text") for _, content in members
+                 if content.get("attachment_text")), ""),
             # 合并时同样要带上：清单丢在这一步，统一层照样看不到品类。
             "product_list": primary_content.get("product_list") or "",
             "source_fields": primary_content.get("source_fields") or primary_candidate.get("source_fields") or {},

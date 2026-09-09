@@ -214,6 +214,30 @@ class CandidateContractTests(unittest.TestCase):
         self.assertEqual(candidate["content_access"], "metadata_only")
         self.assertFalse(candidate["retrieval_verified"])
 
+    def test_table_cells_keep_their_boundaries(self):
+        """`</td>` 塌成空格会把整行连成长句，「命中关键词」就只剩碎片。"""
+        html = ("<tr><td>4</td><td>过敏原特异性IgE抗体检测试剂盒</td>"
+                "<td>用于定性检测人血清样本中的过敏原特异性IgE抗体。</td></tr>")
+        self.assertIn("\n过敏原特异性IgE抗体检测试剂盒\n", zlbx_search.html_to_text(html))
+
+    def test_parsed_attachment_rides_along_in_its_own_field(self):
+        candidate = build_candidate(
+            {"bid_id": 1, "title": "某医院新增医用耗材采购公告", "url": "https://example.test/a"},
+            {"source": "正文：详见附件。", "source_ext": "4 过敏原特异性IgE抗体检测试剂盒"},
+            set())
+        self.assertEqual(candidate["attachment_text"], "4 过敏原特异性IgE抗体检测试剂盒")
+        # 附件不得混进正文：content 是「公告正文本身取到没有」的唯一依据。
+        self.assertEqual(candidate["content"], "正文：详见附件。")
+
+    def test_a_rich_attachment_does_not_disguise_a_shell_body(self):
+        shell = ("标题：某医院新增医用耗材一批采购项目遴选公告\n"
+                 "发布时间：2026-09-08 00:00:00\n完整信息请查看原文： 原文链接")
+        candidate = build_candidate(
+            {"bid_id": 1, "title": "某医院试剂采购", "url": "https://example.test/a"},
+            {"source": shell, "source_ext": "过敏原特异性IgE抗体检测试剂盒 " * 200}, set())
+        self.assertEqual(candidate["content_access"], "public_partial")
+        self.assertFalse(candidate["retrieval_verified"])
+
     def test_shell_body_is_not_treated_as_full_text(self):
         """「详情请求成功」不等于「正文足以核验」。真实样本：73 字的壳。"""
         shell = ("标题：过敏性疾病创新药物国家工程研究中心建设项目招标公告\n"
@@ -362,12 +386,13 @@ class ReopenForBodySignalTests(unittest.TestCase):
         "sm_names": ["多参数生物反馈仪", "全自动化学发光分析仪", "凝血分析仪"],
     }
 
-    def run_collect(self, listing, body, ledger=()):
+    def run_collect(self, listing, body, ledger=(), attachment=""):
         details = {}
 
         def fake_detail(client, item):
             details[item["bid_id"]] = details.get(item["bid_id"], 0) + 1
-            return {"source": body, "source_url": "https://origin.example/1",
+            return {"source": body, "source_ext": attachment,
+                    "source_url": "https://origin.example/1",
                     "bid_id": item["bid_id"], "title": item["title"]}
 
         with patch.object(zlbx_search, "collect_listings",
@@ -446,4 +471,57 @@ class ReopenForBodySignalTests(unittest.TestCase):
         self.assertEqual(stats["reopened_count"], 0)
         self.assertEqual(stats["prefilter_dropped_count"], 1)
         self.assertEqual(details, {})
+        self.assertEqual(candidates, [])
+
+    SUPPLY_LOT = {
+        "bid_id": 5, "title": "茂名市电白区人民医院新增医用耗材采购需求信息公告",
+        "pub_time": "2026-09-07", "url": "https://x.org/mm",
+        "caller_name": "茂名市电白区人民医院", "sm_names": ["医用耗材"],
+    }
+    # 正文只有报名须知，标的清单是一份 .xls；知了把它解析进 source_ext 一并回传。
+    REGISTRATION_ONLY = ("二、项目内容及需求： 茂名市电白区人民医院新增医用耗材"
+                         "项目内容及需求.xls 三、供应商资格条件 …… 四、报名资料要求")
+    PARSED_ATTACHMENT = ("1.Sheet1 新增医用耗材项目内容及需求 3 传送导管 专用输送鞘管 "
+                         "4 过敏原特异性IgE抗体检测试剂盒 用于定性检测人血清样本中的"
+                         "过敏原特异性IgE抗体。")
+
+    def test_signal_only_in_the_parsed_attachment_is_reopened_and_queued(self):
+        """2026-09-09 复盘的茂名电白那条：详情早就带回附件解析文本，只是没人读。"""
+        candidates, stats, details = self.run_collect(
+            self.SUPPLY_LOT, self.REGISTRATION_ONLY, attachment=self.PARSED_ATTACHMENT)
+        self.assertEqual(stats["reopened_count"], 1)
+        self.assertEqual(stats["reopened_kept_count"], 1)
+        self.assertEqual(stats["reopened_kept"][0]["gate"], "耗材")
+        self.assertEqual(details, {5: 1})
+        self.assertEqual(len(candidates), 1)
+        # 命中归因同样要看得到附件，否则这条说不出「为什么会检索到它」。
+        self.assertTrue(candidates[0]["found_by_source_query"])
+
+    EARLY_STAGE = {
+        "bid_id": 6, "title": "关于桂林市中医医院病房能力提升项目市场调研服务采购公告",
+        "pub_time": "2026-09-07", "url": "https://x.org/gl",
+        "caller_name": "桂林市中医医院", "sm_names": ["病房能力提升项目市场调研服务"],
+    }
+
+    def test_early_stage_hospital_notice_is_reopened_and_queued(self):
+        """医院的前期公告：标的物就是项目名，50 项设备清单整份在附件里。"""
+        candidates, stats, details = self.run_collect(
+            self.EARLY_STAGE, "因医院工作需要，拟对本项目进行市场调研。采购设备 50项，详见附件1。",
+            attachment=("桂林市中医医院病房改造提升项目设备购置清单\n序号\n设备名称\n数量\n"
+                        "37\nPCR实验室相关设备\n1 批\n"
+                        "38\n全自动化学发光免疫分析仪（过敏原检测）\n1 套\n"
+                        "39\n血培养箱\n1 套"))
+        self.assertEqual(stats["reopened_count"], 1)
+        self.assertEqual(stats["reopened_kept_count"], 1)
+        self.assertEqual(stats["reopened_kept"][0]["gate"], "市场调研")
+        self.assertEqual(details, {6: 1})
+        self.assertEqual(len(candidates), 1)
+        # 清单里并列的 PCR 只写进 body_exclude_term，不得连坐整条混合包。
+        self.assertIn("过敏原", candidates[0]["attachment_text"])
+
+    def test_same_notice_without_the_attachment_is_still_dropped(self):
+        """对照组：附件文本是唯一变量，去掉它这条就该照旧丢。"""
+        candidates, stats, _ = self.run_collect(self.SUPPLY_LOT, self.REGISTRATION_ONLY)
+        self.assertEqual(stats["reopened_count"], 1)
+        self.assertEqual(stats["reopened_kept_count"], 0)
         self.assertEqual(candidates, [])

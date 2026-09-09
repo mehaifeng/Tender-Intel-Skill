@@ -698,19 +698,29 @@ def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
         # 统一层兜底：适配器只拿标题与标的物清单做过预筛，正文是取详情之后才有的，
         # 到这里才第一次带正文过产品域筛选。
         # 硬排除只看标题，正文只打标记（search_common.screen_domain）。
+        visible_domain = "\n".join((
+            content.get("summary") or "",
+            content.get("content") or "",
+            # 正文写「详见附件」「下载」时，清单只存在于来源自带的标的字段里。
+            content.get("product_list") or "",
+        ))
+        # 信源替我们解析好的附件文本（知了的 source_ext）随详情一起返回、不另计费，
+        # 却常常是「详见附件」那类公告唯一写着标的的地方，同属正文域。
+        attachment_text = content.get("attachment_text") or ""
         screen = screen_domain(
             item.get("title", ""),
-            "\n".join((
-                content.get("summary") or "",
-                content.get("content") or "",
-                # 正文写「详见附件」「下载」时，清单只存在于来源自带的标的字段里。
-                content.get("product_list") or "",
-            )),
+            "\n".join(part for part in (visible_domain, attachment_text) if part),
         )
         if not screen["keep"]:
             screened_out.append({**item, "skip_reason": screen["reason"]})
             continue
         signals = screen["signals"]
+        # 信号只在附件里时必须说出来：正文里回找不到任何品类词，核实阶段看到的就是
+        # 一篇「新增医用耗材一批」的公告，没有这个标记它会照着正文判 exclude。
+        signal_only_in_attachment = bool(
+            attachment_text and signals
+            and not screen_domain(item.get("title", ""), visible_domain)["signals"]
+        )
         # 采购主体闸门放在取到正文之后——`单位` 要等适配器的 source_fields 才拿得到。
         # 只传采购人与标题，绝不传正文（见 search_common.non_hospital_buyer）。
         candidate_fields = item.get("source_fields") or content.get("source_fields") or {}
@@ -729,10 +739,19 @@ def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
             # 命中关键词与科室同样要看清单：正文写「详见附件」时词只在这里。
             content.get("product_list", ""),
         ))
+        # 命中关键词与科室还要再看一眼附件：`过敏原特异性IgE抗体检测试剂盒` 这种
+        # 完整品名只在附件表格的单元格里。**汇总页判定不看附件**——它问的是「这一页
+        # 覆盖了多少家采购人」，答案只能来自公告自己，一张列满医院名的业绩表或
+        # 参考发票表不该把单家医院的公告判成汇总页。
+        evidence_text = "\n".join(
+            part for part in (retrieved_text, attachment_text) if part)
         enriched["search_evidence"] = {
             "title_has_procurement_intent": True,
             "target_category_signals": signals,
             "signal_tier": signal_tier(signals),
+            # true = 品类信号只出现在附件解析文本里，标题、摘要、正文、清单都没有。
+            # 核实阶段照正文回找会是空结果，这不是矛盾，见 references/verification.md。
+            "signal_only_in_attachment": signal_only_in_attachment,
             # 正文里同时出现的非本司产品域词。非排除依据——它只说明这是混合包，
             # 提示核实阶段确认本司品类那一两行是真的（verification.md「大宗混合包」）。
             "body_exclude_term": screen["body_exclude_term"],
@@ -750,11 +769,11 @@ def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
             "field_evidence": item.get("field_evidence") or content.get("field_evidence") or {},
             "attachments": item.get("attachments") or content.get("attachments") or [],
             "matched_keywords": matched_query_keywords(
-                item, retrieved_text, content.get("product_list", "")
+                item, evidence_text, content.get("product_list", "")
             ),
             # 多家单位合成的汇总页：接口的结构化字段各来自不同子公告，一律不绑定。
             "aggregate_notice": aggregate_notice(item.get("title", ""), retrieved_text),
-            "departments": extract_departments(retrieved_text),
+            "departments": extract_departments(evidence_text),
         }
         # 带上来源自带的地理，和核实阶段的调用口径一致。不带提示时，标题里截出的
         # 机构名没有任何东西能纠偏——「新疆…第三人民医院」曾整批匹到湖南的岳阳县血防医院。
@@ -802,6 +821,8 @@ def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
                 "search_evidence.aggregate_notice 非空表示这是多家单位的汇总页，"
                 "上述字段一律不绑定：先回答「目标标的属于哪一个采购人」，答得出才"
                 "带证据逐个填，答不出就返回manual，不要让它顶着某一家医院发出去。"
+                "search_evidence.signal_only_in_attachment 为 true 表示品类信号只写在"
+                "附件解析文本里，正文回找不到品类词是正常的，不要据此判exclude。"
             ),
             "webhook_fields": WEBHOOK_FIELDS,
             "candidates": queue[offset:offset + batch_size],
@@ -842,6 +863,10 @@ def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
             "queued_broad_signal_only": sum(
                 1 for row in queue
                 if row["search_evidence"]["signal_tier"] == "broad"
+            ),
+            "queued_signal_only_in_attachment": sum(
+                1 for row in queue
+                if row["search_evidence"].get("signal_only_in_attachment")
             ),
             "completed_batches": 0,
         },
