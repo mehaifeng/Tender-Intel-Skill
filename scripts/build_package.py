@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""打开箱即用分发包。
+"""生成 IVD Bid Radar 分发包。
 
-**包内含明文凭据**（知了 API Key 与飞书 Webhook 地址），因此只落在 `dist/`，
-该目录已在 .gitignore 里。不要把生成的包提交仓库或对外分发。
-用 `--no-secrets` 打不含凭据的版本，解压后需自行填 `config/*.json`。
+默认包不含凭据，可对外分发。只有显式传 `--include-secrets` 才会加入知了 API Key
+与飞书应用凭据；含密钥包只落在已忽略的 `dist/`，不得提交仓库或转发。
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ PACKAGE_NAME = "ivd-bid-radar"
 FILES = [
     "SKILL.md",
     "README.md",
-    "AGENT_HANDOFF.md",
     ".gitignore",
     "agents/openai.yaml",
     "references/schema.md",
@@ -45,6 +43,8 @@ FILES = [
     "scripts/tender_ledger.py",
     "scripts/feishu_client.py",
     "scripts/dedup_match.py",
+    "scripts/run_report.py",
+    "scripts/build_package.py",
     "config/zlbx.example.json",
     "config/feishu_app.example.json",
     # 医院索引：没有它跑不出医院全名与等级。台账不再随包分发，运行时从飞书拉。
@@ -60,9 +60,11 @@ TEST_FILES = [
     "tests/test_tender_search.py",
     "tests/test_field_quality.py",
     "tests/test_notice_stage.py",
-    "tests/test_webhook_schema.py",
+    "tests/test_doc_counts.py",
+    "tests/test_payload_schema.py",
     "tests/test_dedup_contract.py",
     "tests/test_dedup_match.py",
+    "tests/test_run_report.py",
     "tests/fake_feishu.py",
 ]
 SECRET_FILES = ["config/zlbx.json", "config/feishu_app.json"]
@@ -73,7 +75,8 @@ QUICKSTART = """# 快速开始
 
 ## 1. 放到技能目录
 
-解压后整个 `ivd-bid-radar/` 目录放进你的技能目录，例如 `~/.hermes/skills/`。
+解压后把技能内容放进 `$CODEX_HOME/skills/ivd-bid-radar/`；未设置 `CODEX_HOME` 时通常是
+`~/.codex/skills/ivd-bid-radar/`。默认安全包的根目录名带 `-nosecrets`，安装时去掉该后缀。
 
 **凭据已在包内**（`config/zlbx.json` 知了 API Key、`config/feishu_app.json` 飞书自建
 应用凭据与目标多维表格），不需要再配环境变量。两个文件权限应为 `0600`；Windows 或部分
@@ -94,7 +97,8 @@ QUICKSTART = """# 快速开始
     python3 scripts/tender_pipeline.py prepare --search-dir .tmp/search/<日期> --batch-size 10
     python3 scripts/tender_pipeline.py next-batch --run-dir .tmp/search/<日期>
 
-之后按 `SKILL.md` 走核实、提交批次、DryRun、推送、登记回执。
+之后按 `SKILL.md` 走核实、提交批次、DryRun、推送、登记回执。省略 `--mode` 就是
+`daily-push`；要跑一轮不写飞书的，显式传 `--mode report-only`。
 默认窗口 72 小时；`--time-range 24h` 或 `YYYY-MM-DD..YYYY-MM-DD` 可改。
 
 长期台账就是飞书多维表格本身，本地不再保存去重库，升级时也没有台账要保留或合并。
@@ -106,8 +110,8 @@ tender_pipeline.py resolve-semantic 登记结论，不要绕过。
 
 ## 4. 花多少钱
 
-按调用次数计费。热态一轮 72h 窗约 **66 积分**（列表约 27 + 每条通过预筛的候选 1 次
-详情），每天跑一次约 **¥132/月**。
+按调用次数计费，费用随候选量变化。2026-09-08 的 72h 实跑为 **113 积分/轮**、
+每天一次约 **¥226/月**；历史值只作量级参考，以当轮 `cost_units` 为准。
 
 `data/query_hits.json` 已随包带上，所以**第一次运行就是热态**（列表约 27 次）；
 删掉它会退回冷启动，列表约 50 次。
@@ -176,20 +180,26 @@ def verify(package_dir, include_tests):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="打开箱即用分发包")
-    parser.add_argument("--no-secrets", action="store_true", help="不带凭据")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    parser = argparse.ArgumentParser(description="生成 IVD Bid Radar 分发包")
+    parser.add_argument("--include-secrets", action="store_true",
+                        help="显式加入本机明文凭据；生成物不得外发")
     parser.add_argument("--no-tests", action="store_true", help="不带自检用例")
     parser.add_argument("--out", help="输出目录；默认 dist/")
     parser.add_argument("--zip-only", action="store_true",
                         help="只留压缩包；自检仍在包目录里跑，跑完把目录删掉")
     args = parser.parse_args()
 
-    include_secrets = not args.no_secrets
+    include_secrets = args.include_secrets
     include_tests = not args.no_tests
     dist = Path(args.out) if args.out else DIST
     stamp = date.today().strftime("%Y%m%d")
     suffix = "" if include_secrets else "-nosecrets"
     package_dir = dist / f"{PACKAGE_NAME}{suffix}"
+    archive = dist / f"{PACKAGE_NAME}-{stamp}{suffix}.zip"
 
     names = build(package_dir, include_secrets, include_tests)
     checks = verify(package_dir, include_tests)
@@ -198,7 +208,15 @@ def main():
     for cache in package_dir.rglob("__pycache__"):
         shutil.rmtree(cache, ignore_errors=True)
 
-    archive = dist / f"{PACKAGE_NAME}-{stamp}{suffix}.zip"
+    if not all(ok for _, ok, _ in checks):
+        if archive.exists():
+            archive.unlink()
+        print(f"包目录：{package_dir}（保留用于排查）")
+        for label, ok, detail in checks:
+            print(f"  自检 {label}: {'通过' if ok else '失败 ' + detail}")
+        print("自检未通过，未生成压缩包")
+        return 1
+
     if archive.exists():
         archive.unlink()
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as handle:

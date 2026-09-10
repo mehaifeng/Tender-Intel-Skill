@@ -18,7 +18,7 @@ from search_common import TARGET_CATEGORY_PATTERNS  # noqa: E402
 from zlbx_search import parse_queries  # noqa: E402
 
 
-DOCS = ("SKILL.md", "README.md", "AGENT_HANDOFF.md",
+DOCS = ("SKILL.md", "README.md",
         "references/keywords.md", "references/zlbx.md",
         "references/schema.md", "references/verification.md")
 

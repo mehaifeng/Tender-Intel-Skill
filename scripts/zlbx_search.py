@@ -84,12 +84,6 @@ def load_api_key():
     )
 
 
-def mask_key(key):
-    """日志与摘要里只留前缀，Key 不进任何落盘文件。"""
-    key = str(key or "")
-    return f"{key[:9]}…" if len(key) > 9 else "…"
-
-
 def parse_queries():
     """从 keywords.md 读检索清单；本适配器不另存副本。"""
     text = REFERENCE_FILE.read_text(encoding="utf-8")
@@ -711,6 +705,12 @@ def collect(client, queries, start, end, batch_size, page_size, max_details, led
     reopened_dropped = []
     for bid_id, item, gate in reopen:
         title = _clean(item.get("title"))
+        if max_details == 0:
+            reopened_dropped.append({
+                "bid_id": bid_id, "title": title, "gate": gate,
+                "reason": "--max-details 0 诊断模式跳过全部详情，无法核对正文信号",
+            })
+            continue
         try:
             detail = fetch_detail(client, item)
             detail_calls += 1
@@ -778,7 +778,8 @@ def main():
                         help="初始每批词数；命中超过单页会自动切半，见 collect_listings")
     parser.add_argument("--page-size", type=int, default=MAX_PAGE_SIZE)
     parser.add_argument("--max-details", type=int, default=60,
-                        help="get_bid_detail 调用上限，每次 1 积分")
+                        help=("常规候选的 get_bid_detail 调用上限；0 跳过全部详情。"
+                              "正文复核分支在正数上限下仍全部获取，避免截断召回"))
     parser.add_argument("--delay", type=float, default=0.25)
     parser.add_argument("--ledger-snapshot",
                         help="飞书台账快照路径；不给就现拉一份写进 --out-dir")
@@ -797,6 +798,8 @@ def main():
             raise ZlbxError("--batch-size 必须大于 0")
         if args.max_details < 0:
             raise ZlbxError("--max-details 不能为负")
+        if args.delay < 0:
+            raise ZlbxError("--delay 不能为负")
 
         if args.dry_run:
             print(json.dumps({
@@ -842,7 +845,6 @@ def main():
             "time_range": f"{start.isoformat(timespec='seconds')}..{end.isoformat(timespec='seconds')}",
             # 实际请求窗口比目标窗口往前多一天，见 WINDOW_LOOKBACK_DAYS。
             "request_time_range": stats.get("request_time_range", ""),
-            "api_key": mask_key(api_key),
             "query_count": len(queries),
             "request_count": client.request_count,
             "cost_units": client.cost_units,

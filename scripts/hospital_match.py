@@ -6,6 +6,7 @@ import argparse
 import gzip
 import json
 import re
+import sys
 import unicodedata
 from collections import defaultdict
 from functools import lru_cache
@@ -350,6 +351,10 @@ def get_default_index():
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description="查询本地全国医疗单位精简索引")
     parser.add_argument("--name", default="", help="公告中的单位名或医院名")
     parser.add_argument("--text", default="", help="标题或摘要等辅助文本")
