@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from tender_identity import scope
+from tender_identity import buyer_key, fingerprint, scope
 from dedup_match import (CONTENT_HIGH, TITLE_HIGH, TITLE_LOW, TOP_K, LedgerMatcher,
                          similarity)
 
@@ -159,6 +159,19 @@ class FunnelLayerTests(unittest.TestCase):
         match = self.check([ledger()], candidate(标题=rewritten))
         self.assertEqual((match.verdict, match.layer), ("duplicate", "L2"))
 
+    def test_a_province_prefixed_buyer_is_the_same_buyer(self):
+        # 知了给的是「云南省玉溪市人民医院」，手工录入的台账写「玉溪市人民医院」。
+        # 硬门把这当成两个采购人时，标题一字不差、同日发布的公告也会被重新推一遍。
+        title = "玉溪市人民医院拟采购全自动化学发光免疫分析仪的采购信息征询"
+        rows = [ledger(标题=title, 单位="玉溪市人民医院")]
+        match = self.check(rows, candidate(标题=title, 单位="云南省玉溪市人民医院"))
+        self.assertEqual((match.verdict, match.layer), ("duplicate", "L1"))
+
+    def test_a_prefix_is_not_stripped_into_an_ambiguous_name(self):
+        # 剥完对不上医院库唯一整名就保持原样：省立医院不是「第一人民医院」。
+        self.assertEqual(buyer_key("云南省第一人民医院"), fingerprint("云南省第一人民医院"))
+        self.assertNotEqual(buyer_key("云南省第一人民医院"), buyer_key("第一人民医院"))
+
     def test_unrelated_titles_are_settled_as_new_without_the_model(self):
         rows = [ledger(标题="乙医院医用耗材配送服务采购公告", 单位="乙医院")]
         match = self.check(rows, candidate(标题="甲医院2026年度过敏原检测试剂采购项目公开招标公告"))
@@ -220,6 +233,15 @@ class FunnelLayerTests(unittest.TestCase):
         match = self.check(rows, candidate(标题="医用耗材公开遴选公告", 单位="乙医院"))
         self.assertEqual(match.verdict, "semantic")
         self.assertLessEqual(len(match.pairs), TOP_K)
+
+    def test_blank_auto_numbers_fall_back_to_unique_record_ids(self):
+        rows = [ledger(标题="医用耗材公开遴选公告", 单位="", 链接=f"https://x.org/{i}", 编号="")
+                for i in range(2)]
+        for i, row in enumerate(rows):
+            row["_record_id"] = f"rec-{i}"
+        match = self.check(rows, candidate(标题="医用耗材公开遴选公告", 单位="乙医院"))
+        self.assertEqual(match.verdict, "semantic")
+        self.assertEqual(len({pair.pair_id for pair in match.pairs}), len(match.pairs))
 
     def test_recorded_decision_removes_the_pair_from_the_model_queue(self):
         rows = [ledger(标题="医用耗材公开遴选公告", 单位="")]

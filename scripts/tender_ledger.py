@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime
@@ -88,8 +89,6 @@ def fetch_ledger(client=None):
     return {
         "schema_version": SCHEMA_VERSION,
         "source": "feishu_api",
-        "app_token": client.credentials["app_token"],
-        "table_id": client.credentials["table_id"],
         "fetched_at": now_iso(),
         "row_count": len(records),
         "rows_missing_identity": blank,
@@ -137,21 +136,12 @@ def refresh_snapshot(run_dir, client=None):
     return path, data
 
 
-def append_record(path, record):
-    """成功写入飞书之后把新行并进本次运行的快照，供同批后续候选查重。"""
-    path = Path(path)
-    with ledger_lock(path):
-        data = read_snapshot(path)
-        if not any(r.get("_record_id") and r["_record_id"] == record.get("_record_id")
-                   for r in data["records"]):
-            data["records"].append(record)
-            data["row_count"] = len(data["records"])
-            save_snapshot(path, data)
-    return record
-
-
 def main():
     import argparse
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description="拉取飞书台账快照或查看其概况")
     parser.add_argument("command", choices=["fetch", "show"])
     parser.add_argument("--run-dir", help="快照写入/读取的运行目录")

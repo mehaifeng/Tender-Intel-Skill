@@ -23,16 +23,29 @@ def fingerprint(value):
     return title_fingerprint(text(value))
 
 
+# 采购人常带一层行政区前缀：知了给的是「云南省玉溪市人民医院」，手工录入的台账写
+# 「玉溪市人民医院」。剥掉前缀后仍能整名唯一命中医院库时按整名归一，剥完对不上或
+# 对上多条就保持原样——「云南省第一人民医院」剥成「第一人民医院」不唯一，照旧不归一。
+GEO_PREFIX = re.compile(r"^[一-龥]{2,6}?(?:省|自治区|特别行政区|市|自治州|地区|盟)")
+
+
 @lru_cache(maxsize=8192)
 def buyer_key(value):
     value = text(value)
     if not value:
         return ""
     from hospital_match import get_default_index
-    match = get_default_index().match(name=value)
-    # 仅整名/整别名唯一匹配可以归一采购人；不接受正文或子串猜测。
-    if match.get("matched") and match.get("match_method", "").startswith("explicit_"):
-        value = match["hospital_name"]
+    index = get_default_index()
+    name = value
+    for _ in range(3):
+        match = index.match(name=name)
+        # 仅整名/整别名唯一匹配可以归一采购人；不接受正文或子串猜测。
+        if match.get("matched") and match.get("match_method", "").startswith("explicit_"):
+            return fingerprint(match["hospital_name"])
+        stripped = GEO_PREFIX.sub("", name, count=1)
+        if stripped == name or len(stripped) < 4:
+            break
+        name = stripped
     return fingerprint(value)
 
 
@@ -120,6 +133,8 @@ def url_key(value):
 
 
 def source_ids(url):
+    # jrbx/ccgp 适配器已经移除；这里仍认旧链接，只为匹配飞书历史台账和知了返回的
+    # 原始/备用来源 URL，不代表它们还是主动检索源。
     ids = set()
     bid = zlbx_bid_id(url)
     if bid:

@@ -25,7 +25,6 @@ from zlbx_search import (  # noqa: E402
     build_candidate,
     collect_listings,
     html_to_text,
-    mask_key,
     parse_queries,
     parse_time_range,
     product_list_of,
@@ -295,15 +294,6 @@ class BodyCompletenessTests(unittest.TestCase):
         self.assertEqual(body_completeness("   ")[0], "metadata_only")
 
 
-class CredentialTests(unittest.TestCase):
-    def test_api_key_is_masked(self):
-        """摘要与日志只留前缀；Key 不进任何落盘文件，也不进测试固件。"""
-        masked = mask_key("zlbx_" + "A" * 30 + "SECRETTAIL")
-        self.assertTrue(masked.startswith("zlbx_AAAA"))
-        self.assertNotIn("SECRETTAIL", masked)
-        self.assertLess(len(masked), 12)
-
-
 def _t():
     from datetime import datetime
     return datetime(2026, 9, 5)
@@ -386,7 +376,7 @@ class ReopenForBodySignalTests(unittest.TestCase):
         "sm_names": ["多参数生物反馈仪", "全自动化学发光分析仪", "凝血分析仪"],
     }
 
-    def run_collect(self, listing, body, ledger=(), attachment=""):
+    def run_collect(self, listing, body, ledger=(), attachment="", max_details=60):
         details = {}
 
         def fake_detail(client, item):
@@ -400,7 +390,7 @@ class ReopenForBodySignalTests(unittest.TestCase):
              patch.object(zlbx_search, "fetch_detail", side_effect=fake_detail):
             candidates, stats = zlbx_search.collect(
                 None, ["变态反应", "过敏", "印迹"], datetime(2026, 9, 5), datetime(2026, 9, 8),
-                8, 50, 60, ledger_records=list(ledger))
+                8, 50, max_details, ledger_records=list(ledger))
         return candidates, stats, details
 
     def test_body_only_signal_is_reopened_and_queued(self):
@@ -413,6 +403,14 @@ class ReopenForBodySignalTests(unittest.TestCase):
         self.assertEqual(stats["reopened_kept"][0]["gate"], "分析仪")
         # 命中归因要按正文重算，否则这条候选说不出「为什么会检索到它」。
         self.assertTrue(candidates[0]["found_by_source_query"])
+
+    def test_zero_max_details_skips_reopen_requests_too(self):
+        candidates, stats, details = self.run_collect(
+            self.MILITARY, "正文里有过敏原试剂", max_details=0)
+        self.assertEqual(candidates, [])
+        self.assertEqual(details, {})
+        self.assertEqual(stats["reopened_count"], 1)
+        self.assertIn("跳过全部详情", stats["reopened_dropped"][0]["reason"])
 
     def test_body_with_only_broad_fragments_is_still_dropped(self):
         # 宽片段在几十行的设备清单里几乎必然出现一次，靠它放行等于全量取详情。

@@ -35,6 +35,10 @@ class FeishuError(Exception):
     pass
 
 
+class FeishuWriteResultUnknown(FeishuError):
+    """写请求遇到传输故障，服务端可能已经落库，调用方必须回查且不得重试。"""
+
+
 def load_credentials(config_path=None):
     """环境变量优先，其次受保护的本地配置。缺任何一项都直接失败，不猜。"""
     keys = ("app_id", "app_secret", "app_token", "table_id")
@@ -72,7 +76,8 @@ class FeishuClient:
 
     # ---- 传输 ----
 
-    def _call(self, method, path, body=None, params=None, retries=0):
+    def _call(self, method, path, body=None, params=None, retries=0,
+              uncertain_on_transport=False):
         url = BASE + path + ("?" + urlencode(params) if params else "")
         headers = {"Content-Type": "application/json; charset=utf-8",
                    "Authorization": "Bearer " + self.token()}
@@ -87,7 +92,10 @@ class FeishuClient:
                 if attempt < retries:
                     time.sleep(1.5 * (attempt + 1))
                     continue
-                raise FeishuError(f"飞书接口 {path} 调用失败：{exc}") from exc
+                error = f"飞书接口 {path} 调用失败：{exc}"
+                if uncertain_on_transport:
+                    raise FeishuWriteResultUnknown(error) from exc
+                raise FeishuError(error) from exc
             if payload.get("code") == 0:
                 return payload.get("data") or {}
             # 业务错误码不重试：重试改变不了权限、参数或配额问题。
@@ -176,7 +184,10 @@ class FeishuClient:
 
     def create_record(self, fields):
         """新增一行。调用方必须把未知结果当作「可能已写入」，禁止自动重试。"""
-        data = self._call("POST", self.table_path + "/records", body={"fields": fields}, retries=0)
+        data = self._call(
+            "POST", self.table_path + "/records", body={"fields": fields}, retries=0,
+            uncertain_on_transport=True,
+        )
         return data.get("record") or {}
 
 

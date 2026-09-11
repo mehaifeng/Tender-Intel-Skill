@@ -14,7 +14,7 @@ from tender_pipeline import (  # noqa: E402
 )
 
 
-class WebhookSchemaTests(unittest.TestCase):
+class PayloadSchemaTests(unittest.TestCase):
     def _payload(self):
         payload = {field: "null" for field in FIELDS}
         payload["标题"] = "某医院过敏原试剂公开招标公告"
@@ -91,7 +91,7 @@ class MatchedKeywordTests(unittest.TestCase):
         self.assertEqual(values[-1], "细胞因子检测")
 
     def test_null_keyword_payload_is_rejected(self):
-        payload = WebhookSchemaTests()._payload()
+        payload = PayloadSchemaTests()._payload()
         payload["命中关键词"] = "null"
         self.assertTrue(any("命中关键词" in error for error in validate_payload(payload)))
 

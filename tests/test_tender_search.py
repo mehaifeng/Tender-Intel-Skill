@@ -13,13 +13,17 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import tender_search  # noqa: E402
 from tender_search import AUTH_ERROR_EXIT_CODE, build_command  # noqa: E402
-from tender_pipeline import prepare, PipelineError  # noqa: E402
+from tender_pipeline import DEFAULT_PREPARE_MODE, prepare, PipelineError  # noqa: E402
 from tender_ledger import LedgerError, fetch_ledger, save_snapshot, snapshot_path  # noqa: E402
 sys.path.insert(0, str(ROOT / "tests"))
 import fake_feishu  # noqa: E402
 
 
 class TenderSearchEntryTests(unittest.TestCase):
+    def test_prepare_defaults_to_the_pushing_mode(self):
+        """默认必须是完成推送的那条路径：定时任务不会在提示里补一句「请写入飞书」。"""
+        self.assertEqual(DEFAULT_PREPARE_MODE, "daily-push")
+
     def test_command_passes_through_search_parameters(self):
         class Args:
             time_range = "72h"
@@ -100,7 +104,6 @@ class TenderSearchEntryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp) / "run"
             run.mkdir()
-            (run / "candidate_index.jsonl").write_text("", encoding="utf-8")
             (run / "search_summary.json").write_text(json.dumps({
                 "source": "zlbx", "exit_code": 3, "source_auth_failed": True,
                 "candidate_count": 0,

@@ -17,10 +17,9 @@ from datetime import datetime
 from pathlib import Path
 
 from dedup_match import LedgerMatcher
-from feishu_client import FeishuClient, FeishuError, cell_value
+from feishu_client import FeishuClient, FeishuError, FeishuWriteResultUnknown, cell_value
 from tender_identity import remember_aliases
-from tender_ledger import (LedgerError, append_record, fetch_ledger, ledger_lock,
-                           save_snapshot, to_record)
+from tender_ledger import LedgerError, fetch_ledger, ledger_lock, save_snapshot, to_record
 
 
 FIELDS = [
@@ -30,9 +29,9 @@ FIELDS = [
 ]
 # 载荷字段 -> 多维表格字段。其余字段两边同名。
 FIELD_ALIASES = {"科室": "科室名称", "命中关键词": "关键词命中", "内容（检索的摘要）": "内容"}
-# 原先由飞书自动化流程补的列。改走接口后由发送器自己写，否则新行会缺这些状态。
-CONSTANT_FIELDS = {"标讯来源": "AI收集", "标讯状态": "新推送", "是否已推送": True}
-TIMESTAMP_FIELDS = ("插入表格的时间", "推送时间")
+# 表里区分来源与初始状态的两列，接口写入时没人填，发送器补上。
+# 「是否已推送」和两个时间戳归表格自身的工作流，发送器不碰。
+CONSTANT_FIELDS = {"标讯来源": "AI收集", "标讯状态": "新插入"}
 PROVINCE_LEVEL_DIVISIONS = {
     "北京", "天津", "上海", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江",
     "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南",
@@ -136,14 +135,11 @@ def validate_payload(payload):
     return errors
 
 
-def build_fields(payload, schema, now_ms=None):
+def build_fields(payload, schema):
     """16字段载荷 -> 多维表格写入体。空值直接不传，不再往表里写字符串 null。"""
-    now_ms = now_ms if now_ms is not None else int(datetime.now().timestamp() * 1000)
     fields, dropped = {}, []
     values = {FIELD_ALIASES.get(k, k): v for k, v in payload.items()}
     values.update(CONSTANT_FIELDS)
-    for name in TIMESTAMP_FIELDS:
-        values[name] = now_ms
     for name, raw in values.items():
         meta = schema.get(name)
         if meta is None:
@@ -235,7 +231,7 @@ def send_once(manifest, candidate_id, payload_path, body, client=None):
         fields, dropped = build_fields(payload, client.fields())
         try:
             created = client.create_record(fields)
-        except FeishuError as exc:
+        except FeishuWriteResultUnknown as exc:
             # 结果未知：行可能已经写进去了。按链接回查，回查不出来也不重试。
             recovered = None
             try:
@@ -266,8 +262,13 @@ def send_once(manifest, candidate_id, payload_path, body, client=None):
             "confirmed_at": now_iso(),
         }
         atomic_write_json(receipt_path, receipt)
-
-    append_record(snapshot_path, stored)
+        # 保持同一把锁直到本地快照也包含新行，避免另一进程在写入成功与快照更新之间
+        # 抢到锁、读到旧快照后再次写入同一公告。
+        if not any(r.get("_record_id") and r["_record_id"] == stored.get("_record_id")
+                   for r in ledger["records"]):
+            ledger["records"].append(stored)
+            ledger["row_count"] = len(ledger["records"])
+            save_snapshot(snapshot_path, ledger)
     return {"sent": True, "feishu_record_id": record_id, "feishu_id": stored.get("_feishu_id", ""),
             "dropped_fields": dropped, "receipt": str(receipt_path)}
 

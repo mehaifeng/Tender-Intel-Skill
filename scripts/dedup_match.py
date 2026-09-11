@@ -274,7 +274,11 @@ class LedgerMatcher:
             ledger_content = content_key(record_content(self.records[i]))
             content_sim = (similarity(candidate_content, ledger_content)
                            if candidate_content and ledger_content else 0.0)
-            pairs.append(Pair(pair_id(record.get("candidate_id", ""), self.records[i].get("_feishu_id", "")),
+            # 自动编号可能为空（手工行或接口尚未回填）；退回 record_id，避免多条空编号
+            # 台账行生成同一个 pair_id，导致语义判定互相覆盖。
+            ledger_id = (self.records[i].get("_feishu_id")
+                         or self.records[i].get("_record_id") or f"row-{i}")
+            pairs.append(Pair(pair_id(record.get("candidate_id", ""), ledger_id),
                               self.records[i], title_sim, content_sim))
         pairs.sort(key=lambda p: p.score, reverse=True)
         return pairs, (resolved[0] if resolved else "")

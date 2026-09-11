@@ -20,7 +20,12 @@ from hospital_match import (  # noqa: E402
     loose_key,
 )
 from search_common import target_category_signals  # noqa: E402
-from tender_pipeline import canonical_province, normalize_region_location  # noqa: E402
+from tender_pipeline import (  # noqa: E402
+    PROCUREMENT_METHODS,
+    canonical_procurement_method,
+    canonical_province,
+    normalize_region_location,
+)
 
 
 class CategorySignalTests(unittest.TestCase):
@@ -501,3 +506,52 @@ class AttachmentSignalTests(unittest.TestCase):
         manifest, queue, _ = self.prepare_one(self.ATTACHMENT + "\n" + roster)
         self.assertEqual(manifest["counts"]["queued"], 1)
         self.assertEqual(queue[0]["search_evidence"]["aggregate_notice"], "")
+
+
+class ProcurementMethodTests(unittest.TestCase):
+    """采购方式收敛到固定选项。
+
+    2026-09-10 在生产表上点过：这一列积了 23 个选项，其中 8 个只挂着 1~2 行
+    （磋商会、院内谈判、零散采购、采购公告…），单选筛选已经没法用。写法五花八门
+    的锅在来源——同一种方式知了 `bid_method`、正文和员工录入各写各的。
+    """
+
+    def assertMethod(self, expected, *values):
+        for value in values:
+            self.assertEqual(canonical_procurement_method(value), expected, value)
+
+    def test_canonical_values_pass_through(self):
+        for method in PROCUREMENT_METHODS:
+            self.assertEqual(canonical_procurement_method(method), method)
+
+    def test_negotiation_variants_collapse(self):
+        self.assertMethod("竞争性谈判", "竞争性谈判", "谈判采购", "院内谈判", "谈判", "竞谈",
+                          "议价采购")
+
+    def test_consultation_variants_collapse(self):
+        """「公开竞磋」要走磋商，不能被「公开招标」那条规则先抢走。"""
+        self.assertMethod("竞争性磋商", "竞争性磋商", "公开竞磋", "磋商会", "采用公开竞磋方式进行采购")
+
+    def test_quotation_family_collapses_into_inquiry(self):
+        """询比、比选、竞价在医院侧都是「报个价比一比」，分开列只会稀释筛选。"""
+        self.assertMethod("询价", "询价", "询比", "询比采购", "比选", "竞价", "院内竞价采购")
+
+    def test_invited_tender_does_not_fall_into_open_tender(self):
+        self.assertMethod("邀请招标", "邀请招标", "邀标")
+        self.assertMethod("公开招标", "公开招标", "采购方式：公开招标", "公开招标公告",
+                          "现对某项目进行公开招标")
+
+    def test_shortlist_and_market_survey_stay_separate(self):
+        """遴选与市场调研是两类前期公告，都是早期信号，不能一起丢进「其他」。"""
+        self.assertMethod("遴选", "遴选", "公开遴选", "院内遴选", "入围遴选")
+        self.assertMethod("市场调研", "市场调研", "市场调查", "院内市场调研",
+                          "市场调研意向征集", "邀请论证", "需求调查")
+
+    def test_single_source_wins_over_everything(self):
+        self.assertMethod("单一来源", "单一来源", "单一来源采购", "采购项目单一来源公示")
+
+    def test_unrecognized_wording_becomes_other_but_empty_stays_empty(self):
+        """空=公告没披露，其他=披露了但归不进选项。两者别混。"""
+        self.assertMethod("其他", "其他", "零散采购", "院内自行采购", "面向市场采购", "采购公告")
+        self.assertMethod("null", "", "null", None)
+

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""IVD Bid Radar 的轻量状态机、医院匹配与 Webhook 载荷门禁。
+"""IVD Bid Radar 的轻量状态机、医院匹配与飞书载荷门禁。
 
 模型只处理 prepare 生成的小批次；脚本负责去重、保守预筛、医院库匹配、
-固定 16 字段归一化、载荷导出和成功回执登记。本脚本不发送网络请求。
+固定 16 字段归一化、载荷导出和成功回执登记。`prepare` 在快照缺失或显式
+`--refresh-ledger` 时会读取飞书台账；本脚本不执行生产写入。
 """
 
 import argparse
@@ -39,11 +40,14 @@ from search_common import (
 
 
 ROOT = Path(__file__).resolve().parent.parent
-MODES = {"daily-push", "search-only", "verify-only", "report-only"}
+MODES = {"daily-push", "report-only"}
+# 本技能就是为无人值守的每日推送建的，默认必须是完成推送的那条路径：定时任务不会
+# 在提示里多写一句「请写入飞书」，默认成 report-only 等于让台账天天空着。离线任务
+# 由调用方显式传 --mode report-only，manifest 的 live_push_allowed 随之关闭。
 DEFAULT_PREPARE_MODE = "daily-push"
 DECISIONS = {"create", "exclude", "manual"}
 
-WEBHOOK_FIELDS = [
+PAYLOAD_FIELDS = [
     "标题", "项目编号", "单位", "地区", "所属省/市", "所属大区", "发布时间", "截止时间",
     "预算", "采购方式", "科室", "命中关键词", "内容（检索的摘要）", "链接",
     "医院全名", "医院等级",
@@ -92,6 +96,28 @@ PROVINCE_FULL_NAMES = {
     "西藏": "西藏自治区", "陕西": "陕西省", "甘肃": "甘肃省", "青海": "青海省",
     "宁夏": "宁夏回族自治区", "新疆": "新疆维吾尔自治区", "内蒙古": "内蒙古自治区",
 }
+# 台账的`采购方式`是单选：值不在选项里就会被丢掉，写进去也是空白。而同一种方式在
+# 知了 `bid_method`、正文和员工录入里有十几种写法（谈判采购／院内谈判／竞谈都是竞争性
+# 谈判，公开竞磋／磋商会都是竞争性磋商），逐个登记成选项，筛选就没法用了。这里收敛到
+# 九个：法定五种（公开招标、邀请招标、竞争性谈判、竞争性磋商、单一来源），加上医院常用
+# 的询价（含询比、比选、竞价）、遴选（含入围）、市场调研（含意向征集、需求论证等前期
+# 公告），认不出的落到「其他」。
+PROCUREMENT_METHODS = (
+    "公开招标", "邀请招标", "竞争性谈判", "竞争性磋商", "询价",
+    "单一来源", "遴选", "市场调研", "其他",
+)
+# 先匹配先赢，顺序即优先级：「公开竞磋」要走磋商而不是招标，「邀请招标」要走邀请
+# 而不是招标，「邀请论证」要走市场调研而不是邀请招标。
+PROCUREMENT_METHOD_RULES = (
+    ("单一来源", re.compile(r"单一来源|唯一来源")),
+    ("邀请招标", re.compile(r"邀请招标|邀标")),
+    ("公开招标", re.compile(r"公开招标|公开招投标")),
+    ("竞争性磋商", re.compile(r"竞争性磋商|竞磋|磋商")),
+    ("竞争性谈判", re.compile(r"竞争性谈判|竞谈|谈判|议价")),
+    ("询价", re.compile(r"询价|询比|比选|比价|竞价")),
+    ("遴选", re.compile(r"遴选|入围")),
+    ("市场调研", re.compile(r"市场调研|市场调查|需求调查|意向征集|征集意向|调研|论证")),
+)
 DATE_RE = re.compile(r"^20\d{2}-[01]\d-[0-3]\d$")
 DATETIME_RE = re.compile(r"^20\d{2}-[01]\d-[0-3]\d(?:T[0-2]\d:[0-5]\d(?::[0-5]\d)?)?$")
 BUDGET_RE = re.compile(r"^\d+(?:\.\d+)?$")
@@ -230,7 +256,7 @@ def compose_summary(summary, product_list):
     正文写「详见附件」「下载」时摘要里一个标的都没有，推出去销售无从判断相关性；
     清单本来就是这类公告唯一能定品类的内容，所以接在后面。
 
-    **本模块的 `compact_text` 对空值返回字符串 `"null"`**（Webhook 十六字段全字符串、
+    **本模块的 `compact_text` 对空值返回字符串 `"null"`**（十六字段载荷全字符串、
     不许出现 JSON null），所以这里必须显式比 `"null"`，不能只看真值——正文没有标的
     清单时 `product_list` 就是空，2026-09-05 实测因此给当时每条无清单载荷的
     摘要都缀上了一句 `【标的清单】null`。
@@ -277,7 +303,7 @@ def compact_text(value, limit=None):
     return text
 
 
-def to_webhook_text(value):
+def to_payload_text(value):
     if value is None or value == "":
         return "null"
     if isinstance(value, bool):
@@ -595,6 +621,21 @@ def region_for(province_value):
     return "null"
 
 
+def canonical_procurement_method(value):
+    """任意写法 -> 台账单选的九个选项之一；空值仍是`null`，说了但认不出的落「其他」。"""
+    raw = "" if value in (None, "", "null") else compact_text(value)
+    if not raw or raw == "null":
+        return "null"
+    if raw in PROCUREMENT_METHODS:
+        return raw
+    for method, pattern in PROCUREMENT_METHOD_RULES:
+        if pattern.search(raw):
+            return method
+    # 公告确实写了采购方式，只是不属于常见的八种（零散采购、院内自行采购这类）。
+    # 与留空区分开：空表示公告没披露，「其他」表示披露了但归不进选项。
+    return "其他"
+
+
 def candidate_publish_date(candidate):
     value = str(candidate.get("publish_time") or "")
     match = re.search(r"20\d{2}-[01]\d-[0-3]\d", value)
@@ -632,8 +673,6 @@ def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
     if manifest_path.exists() and not force:
         raise PipelineError(f"运行清单已存在：{manifest_path}；使用status续跑，或显式--force重建")
 
-    candidates = load_jsonl(search_dir / "candidate_index.jsonl")
-    validate_candidate_index(candidates, search_dir)
     search_summary_path = search_dir / "search_summary.json"
     search_summary = load_json(search_summary_path) if search_summary_path.exists() else None
     if search_summary:
@@ -649,6 +688,8 @@ def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
                 f"检索来源以退出码 {search_summary['exit_code']} 结束，本次结果不完整；"
                 f"原因：{search_summary.get('failure_reason') or '见检索输出'}"
             )
+    candidates = load_jsonl(search_dir / "candidate_index.jsonl")
+    validate_candidate_index(candidates, search_dir)
     ledger_path, ledger = ledger_for(search_dir, refresh_ledger)
     matcher = LedgerMatcher(ledger["records"], load_semantic_decisions(pipeline_dir))
 
@@ -792,9 +833,10 @@ def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
             enriched["hospital_suggestion"] = suggestion
         queue.append(enriched)
 
-    if len(semantic_review) > MAX_SEMANTIC_PAIRS:
+    semantic_pair_count = sum(len(row.get("台账候选") or []) for row in semantic_review)
+    if semantic_pair_count > MAX_SEMANTIC_PAIRS:
         raise PipelineError(
-            f"待语义判定的候选有 {len(semantic_review)} 条，超过上限 {MAX_SEMANTIC_PAIRS}；"
+            f"待语义判定的配对有 {semantic_pair_count} 个，超过上限 {MAX_SEMANTIC_PAIRS}；"
             "先查检索窗口与台账是否异常，不要让模型逐条比对整批"
         )
     pipeline_dir.mkdir(parents=True, exist_ok=True)
@@ -824,7 +866,7 @@ def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
                 "search_evidence.signal_only_in_attachment 为 true 表示品类信号只写在"
                 "附件解析文本里，正文回找不到品类词是正常的，不要据此判exclude。"
             ),
-            "webhook_fields": WEBHOOK_FIELDS,
+            "payload_fields": PAYLOAD_FIELDS,
             "candidates": queue[offset:offset + batch_size],
         }
         atomic_write_json(batch_path, batch)
@@ -858,6 +900,7 @@ def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
             "queued": len(queue),
             "already_seen": len(already_seen),
             "semantic_review": len(semantic_review),
+            "semantic_review_pairs": semantic_pair_count,
             "screened_out": len(screened_out),
             "concluded": len(concluded),
             "queued_broad_signal_only": sum(
@@ -893,6 +936,12 @@ def get_manifest(run_dir):
 
 
 def authorize_unattended(run_dir):
+    """把定时运行误建的 report-only 升成 daily-push。
+
+    定时、cron 与空载荷调用本身就是推送授权（见 SKILL.md「运行模式」），但调用方
+    偶尔会先按离线建好队列。重跑 prepare --force 要重新拉台账、重算漏斗，这里只改
+    manifest 的门禁位，已经 PUSHED 的运行不许再动。
+    """
     manifest_path, manifest = get_manifest(run_dir)
     current = manifest.get("mode")
     if current == "daily-push":
@@ -1007,10 +1056,10 @@ def canonicalize_create(row, candidate):
     raw = row.get("record")
     if not isinstance(raw, dict):
         raise PipelineError("record必须是对象")
-    extra = sorted(set(raw) - set(WEBHOOK_FIELDS))
+    extra = sorted(set(raw) - set(PAYLOAD_FIELDS))
     if extra:
         raise PipelineError(f"record含旧字段或额外字段：{extra}")
-    record = {field: to_webhook_text(raw.get(field)) for field in WEBHOOK_FIELDS}
+    record = {field: to_payload_text(raw.get(field)) for field in PAYLOAD_FIELDS}
     evidence = row.get("evidence")
     if not isinstance(evidence, dict):
         evidence = {}
@@ -1040,7 +1089,7 @@ def canonicalize_create(row, candidate):
         if field == "科室":
             field_evidence.setdefault(field, "检索正文中的明确科室标签")
         elif field == "命中关键词":
-            field_evidence.setdefault(field, "实际检索Query与候选内容的交集")
+            field_evidence.setdefault(field, "候选内容中命中的目标品类原文片段")
         else:
             field_evidence.setdefault(field, "检索候选中的管线绑定值")
 
@@ -1077,7 +1126,7 @@ def canonicalize_create(row, candidate):
     for field in SOURCE_BOUND_FIELDS:
         if aggregate or (geo_conflict and field in ("地区", "所属省/市")):
             continue
-        value = to_webhook_text(source_fields.get(field))
+        value = to_payload_text(source_fields.get(field))
         if value == "null":
             continue
         supplied = record[field]
@@ -1163,6 +1212,10 @@ def canonicalize_create(row, candidate):
     derived_region = region_for(record["所属省/市"])
     add_adjustment(row, "所属大区", record["所属大区"], derived_region, "按所属省份确定性映射")
     record["所属大区"] = derived_region
+    normalized_method = canonical_procurement_method(record["采购方式"])
+    add_adjustment(row, "采购方式", record["采购方式"], normalized_method,
+                   "采购方式收敛到台账单选的固定选项")
+    record["采购方式"] = normalized_method
     row["record"] = record
     return record, evidence
 
@@ -1171,9 +1224,9 @@ def validate_create(record, evidence, label):
     errors = validate_evidence(evidence, label)
     if not isinstance(record, dict):
         return errors + [f"{label}.record必须是对象"]
-    if list(record.keys()) != WEBHOOK_FIELDS:
+    if list(record.keys()) != PAYLOAD_FIELDS:
         errors.append(f"{label}.record字段顺序或字段集与固定16字段不一致")
-    for field in WEBHOOK_FIELDS:
+    for field in PAYLOAD_FIELDS:
         value = record.get(field)
         if not isinstance(value, str) or value == "":
             errors.append(f"{label}.record.{field}必须是非空字符串；缺失填null")
@@ -1186,6 +1239,10 @@ def validate_create(record, evidence, label):
         errors.append(f"{label}.record.链接必须是http(s) URL")
     if record.get("发布时间") != "null" and not DATE_RE.fullmatch(record["发布时间"]):
         errors.append(f"{label}.record.发布时间必须是YYYY-MM-DD或null")
+    method = record.get("采购方式")
+    if method != "null" and method not in PROCUREMENT_METHODS:
+        # 台账是单选：不在选项里的值写过去会被丢成空白，宁可在这里就报出来。
+        errors.append(f"{label}.record.采购方式必须是固定选项之一或null：{'、'.join(PROCUREMENT_METHODS)}")
     if record.get("截止时间") != "null" and not DATETIME_RE.fullmatch(record["截止时间"]):
         errors.append(f"{label}.record.截止时间必须是YYYY-MM-DD、ISO分钟时间或null")
     if record.get("预算") != "null" and not BUDGET_RE.fullmatch(record["预算"]):
@@ -1203,7 +1260,7 @@ def validate_create(record, evidence, label):
     return errors
 
 
-def validate_batch_results(batch, payload, mode):
+def validate_batch_results(batch, payload):
     rows = payload.get("results") if isinstance(payload, dict) else payload
     if not isinstance(rows, list):
         raise PipelineError("结果文件必须是数组，或含results数组的对象")
@@ -1285,7 +1342,7 @@ def submit_batch(run_dir, batch_id, results_path):
     batch = load_json(batch_meta["path"])
     payload = load_json(results_path)
     try:
-        rows = validate_batch_results(batch, payload, manifest["mode"])
+        rows = validate_batch_results(batch, payload)
     except PipelineError as exc:
         failures = int(batch_meta.get("validation_failures") or 0) + 1
         batch_meta["validation_failures"] = failures
@@ -1328,7 +1385,7 @@ def salvage_batch(run_dir, batch_id, results_path, reason):
         row = by_id.get(candidate_id)
         if row is not None:
             try:
-                valid = validate_batch_results({"candidates": [candidate]}, {"results": [row]}, manifest["mode"])
+                valid = validate_batch_results({"candidates": [candidate]}, {"results": [row]})
                 salvaged.append(valid[0])
                 continue
             except PipelineError:
@@ -1422,7 +1479,8 @@ def resolve_semantic(run_dir, decisions_path):
         "undecided_pairs": undecided,
         # 队列在 prepare 时就已定稿，放行的公告要重建队列才能进批次。
         "next_action": (f"仍有 {len(undecided)} 个配对未判定" if undecided else
-                        f"重跑 prepare --search-dir {manifest['search_dir']} --force 使结论生效"),
+                        f"重跑 prepare --search-dir {manifest['search_dir']} "
+                        f"--mode {manifest['mode']} --force 使结论生效"),
     }
 
 
@@ -1539,7 +1597,11 @@ def _record_push_locked(run_dir, receipt_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="IVD Bid Radar轻量状态机与Webhook门禁")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    parser = argparse.ArgumentParser(description="IVD Bid Radar轻量状态机与飞书载荷门禁")
     sub = parser.add_subparsers(dest="command", required=True)
 
     prepare_parser = sub.add_parser("prepare", help="建立去重、预筛、医院匹配和小批次队列")

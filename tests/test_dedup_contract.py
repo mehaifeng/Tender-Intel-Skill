@@ -14,8 +14,8 @@ from tender_identity import identity, duplicate_reason, IdentityIndex, remember_
 from tender_ledger import (ledger_lock, fetch_ledger, save_snapshot, snapshot_path,
                            LedgerError)
 from search_common import canonical_url, write_candidates, merge_source_dirs
-from tender_pipeline import (cluster_candidates, prepare, record_push, canonicalize_create,
-                             resolve_semantic, PipelineError)
+from tender_pipeline import (authorize_unattended, cluster_candidates, prepare, record_push,
+                             canonicalize_create, resolve_semantic, PipelineError)
 from send_record import FIELDS, send_once, SendError, sha256_bytes, build_fields
 from feishu_client import FeishuError, cell_value, date_text, epoch_ms
 import fake_feishu
@@ -143,6 +143,8 @@ class FeishuLedgerTests(unittest.TestCase):
         self.assertEqual(record["_feishu_id"], "ZB-000001")
         self.assertTrue(record["_pushed"])
         self.assertEqual(ledger["row_count"], 1)
+        self.assertNotIn("app_token", ledger)
+        self.assertNotIn("table_id", ledger)
 
     def test_fetch_failure_never_degrades_to_an_empty_ledger(self):
         real = FakeFeishu()
@@ -170,7 +172,7 @@ class PayloadToTableTests(unittest.TestCase):
         return payload
 
     def fields(self, **overrides):
-        return build_fields(self.payload(**overrides), fake_feishu.SCHEMA, now_ms=1700000000000)
+        return build_fields(self.payload(**overrides), fake_feishu.SCHEMA)
 
     def test_null_values_are_omitted_not_written(self):
         fields, _ = self.fields()
@@ -185,17 +187,21 @@ class PayloadToTableTests(unittest.TestCase):
         self.assertEqual(fields["内容"], "采购过敏原试剂")
         self.assertNotIn("科室", fields)
 
-    def test_url_checkbox_and_datetime_take_their_own_shapes(self):
+    def test_url_field_takes_its_own_shape(self):
         fields, _ = self.fields()
         self.assertEqual(fields["链接"], {"link": "https://example.org/a",
                                           "text": "https://example.org/a"})
-        self.assertIs(fields["是否已推送"], True)
-        self.assertEqual(fields["插入表格的时间"], 1700000000000)
 
-    def test_automation_side_columns_are_filled_by_the_sender(self):
+    def test_source_and_status_are_filled_by_the_sender(self):
         fields, _ = self.fields()
         self.assertEqual(fields["标讯来源"], "AI收集")
-        self.assertEqual(fields["标讯状态"], "新推送")
+        self.assertEqual(fields["标讯状态"], "新插入")
+
+    def test_push_state_columns_are_left_to_the_table_workflow(self):
+        fields, dropped = self.fields()
+        for name in ("是否已推送", "插入表格的时间", "推送时间"):
+            self.assertNotIn(name, fields)
+        self.assertEqual(dropped, [])
 
     def test_unknown_single_select_option_is_dropped_with_a_trace(self):
         fields, dropped = self.fields(采购方式="比选")
@@ -335,6 +341,42 @@ class DeliveryContractTests(unittest.TestCase):
         self.assertTrue(self.send(run)["sent"])
         self.assertEqual(len(self.fake.created), 1)
 
+    def test_known_business_rejection_is_not_misreported_as_unknown(self):
+        run = self.setup_run()
+        real = self.fake
+
+        def rejected(request, timeout=None):
+            if request.full_url.split("?")[0].endswith("/records"):
+                return fake_feishu._Response({"code": 1254064, "msg": "字段校验失败"})
+            return real(request, timeout)
+
+        self.client = fake_feishu.client(transport=rejected)[0]
+        with self.assertRaisesRegex(FeishuError, "字段校验失败"):
+            self.send(run)
+        # 只发生发送前的台账读取；确定性业务错误不做“结果未知”URL 回查。
+        self.assertEqual(real.searches, 1)
+
+    def test_unattended_authorization_only_lifts_a_report_only_run(self):
+        """定时跑先按离线建了队列时的补救路径；已 PUSHED 的运行不许再改门禁位。"""
+        run = self.setup_run()
+        manifest = run[0]
+        pipeline = Path(manifest["payload_dir"]).parent
+        manifest_path = pipeline / "manifest.json"
+
+        def rewrite(**changes):
+            manifest_path.write_text(json.dumps({**manifest, **changes}, ensure_ascii=False),
+                                     encoding="utf-8")
+
+        rewrite(mode="report-only", live_push_allowed=False)
+        lifted = authorize_unattended(self.root / "run")
+        self.assertEqual(lifted["mode"], "daily-push")
+        self.assertTrue(lifted["live_push_allowed"])
+        self.assertEqual(lifted["mode_authorization"]["previous_mode"], "report-only")
+
+        rewrite(mode="report-only", live_push_allowed=False, state="PUSHED")
+        with self.assertRaisesRegex(PipelineError, "已PUSHED"):
+            authorize_unattended(self.root / "run")
+
     def test_another_process_cannot_hold_the_same_snapshot_lock(self):
         run = self.setup_run()
         path = Path(run[0]["ledger_snapshot"])
@@ -398,7 +440,9 @@ class SemanticReviewTests(unittest.TestCase):
 
     def test_model_says_different_and_the_notice_reaches_the_queue(self):
         self.counts()
-        self.assertIn("prepare", self.decide(False)["next_action"])
+        next_action = self.decide(False)["next_action"]
+        self.assertIn("prepare", next_action)
+        self.assertIn("--mode daily-push", next_action)
         counts = self.counts(force=True)
         self.assertEqual(counts["queued"], 1)
         self.assertEqual(counts["semantic_review"], 0)
