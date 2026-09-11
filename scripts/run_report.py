@@ -118,6 +118,13 @@ def day(value):
     return value[:10] if len(value) >= 10 and value[4] == "-" else value
 
 
+def near_miss_text(n):
+    """硬门拦下、却像到本该判重的台账行。误放行只能靠这行字被人看见。"""
+    return "{}《{}》标题相似 {:.2f}（{}）".format(
+        text(n.get("编号")), text(n.get("标题"))[:40],
+        n.get("标题相似度") or 0.0, text(n.get("硬门")))
+
+
 def badges_for(row):
     """候选身上已经写好的标记，直接当徽章用——哪条是弱信号、哪条是混合包一眼可见。"""
     evidence = row.get("search_evidence") or {}
@@ -140,6 +147,10 @@ def badges_for(row):
     if access in ("public_partial", "metadata_only"):
         out.append(("warn", str(access),
                     text(evidence.get("content_access_reason") or row.get("content_access_reason"))))
+    near = row.get("dedup_near_miss") or []
+    if near:
+        out.append(("warn", "去重硬门放行 {}".format(len(near)),
+                    "；".join(near_miss_text(n) for n in near[:3])))
     signals = evidence.get("target_category_signals") or []
     if signals:
         out.append(("plain", "信号 " + "/".join(signals[:4]), ""))
@@ -176,6 +187,8 @@ def view(row, stage_key, reason=""):
     members = row.get("cluster_members") or []
     if len(members) > 1:
         detail = (detail + "；" if detail else "") + "聚类合并 {} 条".format(len(members))
+    for n in (row.get("dedup_near_miss") or [])[:3]:
+        detail = (detail + "；" if detail else "") + "硬门放行：" + near_miss_text(n)
     return {
         "id": row.get("candidate_id", ""),
         "title": text(row.get("title") or row.get("标题")),

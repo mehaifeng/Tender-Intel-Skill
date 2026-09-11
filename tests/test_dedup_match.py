@@ -108,6 +108,60 @@ class FunnelLayerTests(unittest.TestCase):
             标题="甲医院2026年检验科设备更新采购项目（第四包全自动免疫印迹仪、酶联免疫分析系统）第1次更正"))
         self.assertEqual((match.verdict, match.layer), ("duplicate", "L1-后续阶段"))
 
+    def test_a_package_page_of_an_already_pushed_umbrella_tender_is_a_duplicate(self):
+        # 2026-09-11 实跑：医院官网把项目发成一篇总公告（已入账），交易平台把同一个
+        # 项目拆成每包一篇。轮次门硬拦时，0.95 的标题相似度根本不会被计算，三个包
+        # 各自都能再推一遍。放行后由 L2 定案。
+        总标 = "蒙城县中医院检验科(细胞因子十一项)等耗材采购项目比选采购公告"
+        分包 = "蒙城县中医院检验科(细胞因子十一项)等耗材采购项目第二包比选采购公告"
+        self.assertGreaterEqual(similarity(fingerprint(总标), fingerprint(分包)), TITLE_HIGH)
+        rows = [ledger(标题=总标, 单位="蒙城县中医院", 发布时间="2026-09-10",
+                       链接="https://www.mcxzyy.com/show.aspx?cid=103&tid=1475")]
+        match = self.check(rows, candidate(标题=分包, 单位="蒙城县中医院", 发布时间="2026-09-10",
+                                           链接="http://www.ahtba.org.cn/detail/61866424"))
+        self.assertEqual((match.verdict, match.layer), ("duplicate", "L2"))
+
+    def test_a_package_page_with_its_own_subject_still_reaches_the_funnel(self):
+        # 放行不等于判重：分包页写明自己的标的时相似度落在中间带，照旧交给模型，
+        # 不会把一个真正独立的包顺手吞掉。
+        rows = [ledger(标题="甲医院2026年检验科设备更新采购项目招标公告", 单位="甲医院")]
+        match = self.check(rows, candidate(
+            标题="甲医院2026年检验科设备更新采购项目第三包全自动免疫印迹仪、酶联免疫分析系统招标公告",
+            单位="甲医院", 链接="https://y.org/lot3"))
+        self.assertEqual((match.verdict, match.layer), ("semantic", "L4"))
+
+    def test_a_sibling_package_is_still_hard_gated(self):
+        # 台账那行自己带包号时照旧卡住：一包已推 ≠ 二包，那是另一次投标机会。
+        rows = [ledger(标题="甲医院过敏原检测试剂采购项目第一包公开招标公告", 单位="甲医院")]
+        match = self.check(rows, candidate(标题="甲医院过敏原检测试剂采购项目第二包公开招标公告",
+                                           单位="甲医院", 链接="https://y.org/lot2"))
+        self.assertEqual(match.verdict, "new")
+
+    def test_the_umbrella_may_not_be_swallowed_by_a_package_already_pushed(self):
+        # 反方向不放行：台账里只有某一个包时，覆盖全部包的总招标仍是新公告。
+        rows = [ledger(标题="甲医院过敏原检测试剂采购项目第一包公开招标公告", 单位="甲医院")]
+        match = self.check(rows, candidate(标题="甲医院过敏原检测试剂采购项目公开招标公告",
+                                           单位="甲医院", 链接="https://y.org/all"))
+        self.assertEqual(match.verdict, "new")
+
+    def test_a_hard_gated_lookalike_is_recorded_as_a_near_miss(self):
+        # 硬门挡掉的配对不进相似度，报告里只会写「台账中没有相近标题」。像到这个
+        # 程度的必须留痕，否则硬门拦错了事后翻不出来。
+        rows = [ledger(标题="甲医院过敏原检测试剂采购项目第一包公开招标公告", 单位="甲医院")]
+        match = self.check(rows, candidate(标题="甲医院过敏原检测试剂采购项目第二包公开招标公告",
+                                           单位="甲医院", 链接="https://y.org/lot2"))
+        self.assertEqual(match.verdict, "new")
+        self.assertEqual(len(match.near_misses), 1)
+        near = match.near_misses[0]
+        self.assertEqual(near["编号"], "ZB-0001")
+        self.assertEqual(near["硬门"], "轮次、批次或包号不同")
+        self.assertGreaterEqual(near["标题相似度"], TITLE_HIGH)
+
+    def test_ordinary_new_candidates_carry_no_near_miss_noise(self):
+        rows = [ledger(标题="乙医院医用耗材配送服务采购公告", 单位="乙医院")]
+        match = self.check(rows, candidate())
+        self.assertEqual((match.verdict, match.near_misses), ("new", []))
+
     def test_umbrella_relaxation_does_not_swallow_a_retender_correction(self):
         # 放行只给包号。候选带的是轮次（重招）时照旧卡住——那是新的投标机会。
         rows = [self.base(标题="甲医院2026年检验科设备更新采购项目招标公告")]

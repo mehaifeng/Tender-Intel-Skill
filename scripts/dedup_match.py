@@ -10,6 +10,9 @@
 
 进入 L2 之前先过硬门（阶段、项目编号、采购人、轮次/批次/包号、日期窗口），
 硬门与 tender_identity.duplicate_reason 用同一套前置条件，避免两处判重走偏。
+唯一的例外是 umbrella_covers()：台账那行是不带包号的总招标、候选是它其中一个包时
+不再硬拦，改由相似度定案——总标与它的分包页只差一个包号，硬拦会让同一个标按包重推。
+被硬门拦下、却相似到本该判重的配对记进 Match.near_misses，供运行报告留痕。
 """
 from __future__ import annotations
 
@@ -88,6 +91,28 @@ def day_gap(a, b):
     return abs((date.fromisoformat(a) - date.fromisoformat(b)).days)
 
 
+# 分包写法：台账那行是覆盖全部包的总招标，一个包号都不带；候选点名「第二包」。
+PACKAGE_SCOPE = re.compile(r"(?:包|标段|批)$")
+
+
+def umbrella_covers(a, b):
+    """台账那行是覆盖全部包的总招标、候选是它其中一个包吗？
+
+    总招标公告的标题往往一个包号都不写，分包页才点名「第四包」。同一个项目常常
+    在医院官网发成一篇总公告、在交易平台拆成每包一篇，轮次门（a.scope != b.scope）
+    会把这一对踢掉，于是同一个标的每个包、以及每个包的每次更正都能重新推一遍。
+    放行只限这一个方向，且候选带的必须是包号：台账行自己带包号时照旧卡住
+    （第一包已推 ≠ 第三包），候选带的是「次/期/重新招标」这类轮次词时也照旧卡住
+    ——重招对销售是新的投标机会。
+
+    放行只是**不再硬拦**，同一条公告还是不是要由 L2/L3/L4 的相似度来定：
+    总标与它某个包的分页标题几乎只差一个包号（实测 0.95），而真正写明各自标的的
+    分包页会落进中间带，照旧交给正文比对与语义判定。
+    """
+    return bool(not b.scope and a.scope
+                and all(PACKAGE_SCOPE.search(token) for token in a.scope))
+
+
 def blocked(a, b):
     """硬门：命中任一条就不是同一条公告，连相似度都不必算。"""
     if a.phase and b.phase and a.phase != b.phase:
@@ -96,7 +121,8 @@ def blocked(a, b):
         return "项目编号不同"
     if a.buyer and b.buyer and a.buyer != b.buyer:
         return "采购人不同"
-    if a.scope != b.scope and not (a.truncated or b.truncated):
+    if (a.scope != b.scope and not (a.truncated or b.truncated)
+            and not umbrella_covers(a, b)):
         return "轮次、批次或包号不同"
     return ""
 
@@ -122,24 +148,9 @@ def tender_core(ident):
     return core
 
 
-# 分包写法：更正只改其中一个包，台账里那条总招标却一个包号都不带。
-PACKAGE_SCOPE = re.compile(r"(?:包|标段|批)$")
 # 台账主体要认成「候选的总标」，至少得有这么长；再短就是「设备采购」这类通用写法，
 # 拿子串关系判重会把同一家医院的不同标全并成一条。
 SUBJECT_CONTAIN_MIN = 12
-
-
-def umbrella_covers(a, b):
-    """台账那行是覆盖全部包的总招标、候选是它其中一个包的更正吗？
-
-    总招标公告的标题往往一个包号都不写，更正才点名「第四包」。此时轮次门
-    （a.scope != b.scope）会把这一对踢掉，同一个标的每一个包的每一次更正都能
-    重新推一遍。放行只限这一个方向，且候选带的必须是包号：
-    台账行自己带包号时照旧卡住（第一包已推 ≠ 第三包的更正），候选带的是
-    「次/期/重新招标」这类轮次词时也照旧卡住——重招对销售是新的投标机会。
-    """
-    return bool(not b.scope and a.scope
-                and all(PACKAGE_SCOPE.search(token) for token in a.scope))
 
 
 def subject_contains(ledger_core, candidate_core):
@@ -185,6 +196,9 @@ class Match:
     matched: dict = None
     pairs: list = field(default_factory=list)
     candidate_content: str = ""   # 惰性取到的候选正文，交给模型时不必再读一次盘
+    # 被硬门拦下、但标题像到本该判重的台账行。硬门是有意的，可它挡掉的配对连
+    # 相似度都不算，报告里只剩一句「台账中没有相近标题」——误放行事后无从发现。
+    near_misses: list = field(default_factory=list)
 
 
 class LedgerMatcher:
@@ -261,10 +275,23 @@ class LedgerMatcher:
             return resolved
 
         pairs = []
+        near_misses = []
         for i, b in enumerate(self.identities):
-            if blocked(a, b):
-                continue
+            gate = blocked(a, b)
             gap = day_gap(a.published, b.published)
+            if gate:
+                # 硬门不算相似度，唯独「采购人对得上、标题又像到本该判重」的那几对
+                # 留一条痕：它们正是硬门可能拦错的地方，报告要能一眼看见。
+                if (gap is not None and gap <= REPOST_DAYS and title_evidence_ok(a, b)
+                        and similarity(a.fp, b.fp) >= TITLE_HIGH):
+                    near_misses.append({
+                        "编号": text(self.records[i].get("_feishu_id"))
+                                or text(self.records[i].get("_record_id")),
+                        "标题": text(self.records[i].get("标题")),
+                        "标题相似度": similarity(a.fp, b.fp),
+                        "硬门": gate,
+                    })
+                continue
             if gap is None or gap > REPOST_DAYS:
                 continue
             title_sim = similarity(a.fp, b.fp)
@@ -281,7 +308,8 @@ class LedgerMatcher:
             pairs.append(Pair(pair_id(record.get("candidate_id", ""), ledger_id),
                               self.records[i], title_sim, content_sim))
         pairs.sort(key=lambda p: p.score, reverse=True)
-        return pairs, (resolved[0] if resolved else "")
+        near_misses.sort(key=lambda n: n["标题相似度"], reverse=True)
+        return pairs, (resolved[0] if resolved else ""), near_misses[:TOP_K]
 
     # ---- 对外 ----
 
@@ -297,24 +325,28 @@ class LedgerMatcher:
         if matched is not None:
             return Match("duplicate", "L1-后续阶段", reason, matched)
 
-        pairs, body = self._rank(record, a, content_loader)
+        pairs, body, near_misses = self._rank(record, a, content_loader)
         if not pairs:
-            return Match("new", "L2", "台账中没有相近标题")
+            return Match("new", "L2", "台账中没有相近标题", near_misses=near_misses)
 
         decided = [self.decisions.get(p.pair_id) for p in pairs]
         same = next((d for d in decided if d and d.get("same") is True), None)
         if same:
             row = next(p.ledger for p in pairs if p.pair_id == same["pair_id"])
-            return Match("duplicate", "decision", "人工语义核对判定为同一公告：" + same.get("note", ""), row)
+            return Match("duplicate", "decision",
+                         "人工语义核对判定为同一公告：" + same.get("note", ""), row,
+                         near_misses=near_misses)
 
         top = pairs[0]
         b = identity(top.ledger)
         if top.title_sim >= TITLE_HIGH and title_evidence_ok(a, b):
             return Match("duplicate", "L2",
-                         f"标题字符级高度一致（{top.title_sim}）且采购人与发布日期吻合", top.ledger)
+                         f"标题字符级高度一致（{top.title_sim}）且采购人与发布日期吻合", top.ledger,
+                         near_misses=near_misses)
         if top.content_sim >= CONTENT_HIGH and title_evidence_ok(a, b):
             return Match("duplicate", "L3",
-                         f"正文摘要高度一致（{top.content_sim}），标题为跨来源改写", top.ledger)
+                         f"正文摘要高度一致（{top.content_sim}），标题为跨来源改写", top.ledger,
+                         near_misses=near_misses)
 
         undecided = [p for p, d in zip(pairs, decided) if not d]
         # 正文两端都排除得掉的配对不必再问模型。
@@ -322,9 +354,10 @@ class LedgerMatcher:
                      if not (p.content_sim and p.content_sim <= CONTENT_LOW
                              and p.title_sim < TITLE_HIGH)]
         if not undecided:
-            return Match("new", "L3", "字符级与正文相似度都不足以判重")
+            return Match("new", "L3", "字符级与正文相似度都不足以判重", near_misses=near_misses)
         return Match("semantic", "L4", "标题与正文相似度落在需要语义判断的区间",
-                     pairs=undecided[:TOP_K], candidate_content=body)
+                     pairs=undecided[:TOP_K], candidate_content=body,
+                     near_misses=near_misses)
 
 
 def review_row(record, match):
