@@ -709,6 +709,8 @@ def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
             return compose_summary(content.get("summary"), content.get("product_list"))
 
         match = matcher.check(item, candidate_body)
+        # 硬门拦下的相似台账行：这条候选万一是误放行，报告里要留得住线索。
+        near_misses = match.near_misses
         if match.verdict == "duplicate":
             already_seen.append({**item, "skip_reason": match.reason, "match_layer": match.layer,
                                  "matched_feishu_id": (match.matched or {}).get("_feishu_id"),
@@ -773,6 +775,8 @@ def prepare(search_dir, batch_size, mode, force=False, refresh_ledger=False):
             continue
 
         enriched = item.copy()
+        if near_misses:
+            enriched["dedup_near_miss"] = near_misses
         retrieved_text = "\n".join((
             item.get("title", ""),
             summary if summary != "null" else "",
