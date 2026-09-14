@@ -17,7 +17,9 @@ from hospital_match import (  # noqa: E402
     geo_matches,
     get_default_index,
     is_generic_org_name,
+    loose_division_conflict,
     loose_key,
+    strip_province_prefix,
 )
 from search_common import target_category_signals  # noqa: E402
 from tender_pipeline import (  # noqa: E402
@@ -121,6 +123,48 @@ class HospitalMatchTests(unittest.TestCase):
 
     def test_loose_key_drops_division_suffix(self):
         self.assertEqual(loose_key("弥勒市人民医院"), loose_key("弥勒县人民医院"))
+
+    def test_index_name_carrying_a_province_prefix_is_reachable(self):
+        """索引存「湖北省宜城市中医医院」，公告只写「宜城市中医医院」。
+
+        后缀键只能从公告名往前截，截出来的永远比公告名短，够不到更长的索引名，
+        这条记录改动前整条不可达（2026-09-14 实测推送时医院全名与等级双空）。
+        """
+        match = self.index.match(
+            name="宜城市中医医院", province="湖北", city="襄阳市", district="宜城市")
+        self.assertTrue(match["matched"])
+        self.assertEqual(match["hospital_name"], "湖北省宜城市中医医院")
+        self.assertEqual(match["hospital_level"], "二级甲等")
+        self.assertEqual(match["match_method"], "loose_name")
+
+    def test_province_prefix_is_only_stripped_when_the_record_agrees(self):
+        """剥前缀等于凭空多造一个可匹配的写法，必须有记录自身的 p 字段作证。"""
+        self.assertEqual(
+            strip_province_prefix({"n": "湖北省宜城市中医医院", "p": "湖北省"}),
+            "宜城市中医医院")
+        # p 与名字打头的省份不符：这条记录的地理本身就可疑，不给它多一个入口
+        self.assertEqual(
+            strip_province_prefix({"n": "湖北省宜城市中医医院", "p": "云南省"}), "")
+        # p 为空，无从作证
+        self.assertEqual(strip_province_prefix({"n": "湖北省宜城市中医医院", "p": ""}), "")
+        # 本来就没有省级前缀
+        self.assertEqual(strip_province_prefix({"n": "宜城市中医医院", "p": "湖北省"}), "")
+
+    def test_province_prefix_never_creates_a_generic_key(self):
+        """「云南省第一人民医院」剥完只剩全国通用名，不得据此登记宽松键。"""
+        self.assertTrue(is_generic_org_name(loose_key("第一人民医院")))
+        index = get_default_index()
+        self.assertNotIn(loose_key("第一人民医院"), index.loose)
+        self.assertNotIn(loose_key("妇幼保健院"), index.loose)
+
+    def test_province_prefix_does_not_defeat_the_city_county_guard(self):
+        """闸门比的必须是剥掉前缀之后的写法。
+
+        「江西省南昌县人民医院」带着前缀匹不上 LOOSE_DIVISION_RE，闸门会整个失效，
+        把「南昌市人民医院」放进南昌县那一家。
+        """
+        record = {"n": "江西省南昌县人民医院", "p": "江西省", "c": "南昌市", "d": "南昌县"}
+        self.assertTrue(loose_division_conflict("南昌市人民医院", record))
 
     def test_mislabelled_record_keeps_name_but_not_geography(self):
         """故城县在河北衡水，索引把它编码到了云南丽江（故城→古城）。
