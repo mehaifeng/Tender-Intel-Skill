@@ -70,6 +70,37 @@ def loose_key(value):
     return re.sub(r"[市县区]", "", normalize(value).replace("医科大学", "医学院"))
 
 
+# 索引名打头的省级区划名。索引是多来源拼的，其中一路把省名写进了机构名
+# （「湖北省宜城市中医医院」），而公告里的采购人只写「宜城市中医医院」。
+# 后缀键只能从公告名往前截，截出来的键永远比公告名短，够不到更长的索引名，
+# 于是这类记录整条不可达。
+PROVINCE_PREFIX_RE = re.compile(
+    r"^(北京市|天津市|上海市|重庆市|河北省|山西省|辽宁省|吉林省|黑龙江省|江苏省|"
+    r"浙江省|安徽省|福建省|江西省|山东省|河南省|湖北省|湖南省|广东省|海南省|四川省|"
+    r"贵州省|云南省|陕西省|甘肃省|青海省|台湾省|内蒙古自治区|广西壮族自治区|"
+    r"西藏自治区|宁夏回族自治区|新疆维吾尔自治区)")
+
+
+def strip_province_prefix(record):
+    """剥掉索引名打头的省级区划名；不该剥时返回空串。
+
+    **只在前缀与记录自身的 `p` 字段一致时才剥。** 这一条是整个改动的安全边界：
+    剥前缀等于凭空多造一个可匹配的写法，必须有记录自身的地理字段作证，
+    不能只看名字长什么样。`p` 为空的记录一律不剥——无从作证。
+
+    「云南省第一人民医院」这类剥完只剩通用名的也不剥，交给 is_generic_org_name
+    挡掉：全国无数家都叫「第一人民医院」，拿它去认一条 9 字全名纯属巧合。
+    """
+    name = str(record.get("n") or "")
+    match = PROVINCE_PREFIX_RE.match(name)
+    if not match:
+        return ""
+    province = normalize(record.get("p"))
+    if not province or normalize(match.group(1)) != province:
+        return ""
+    return name[match.end():]
+
+
 # 「南昌市人民医院」打头的通名，用来判断宽松键是不是把两级行政区揉成了一家。
 LOOSE_DIVISION_RE = re.compile(r"^([一-鿿]{2,4})([市县])")
 
@@ -85,7 +116,11 @@ def loose_division_conflict(name, record):
     判据是记录自身的地理字段：X 同时是它的市又是它的区县，说明两级并存、不是更名。
     """
     query = LOOSE_DIVISION_RE.match(str(name or "").strip())
-    target = LOOSE_DIVISION_RE.match(str(record.get("n") or ""))
+    # 比的是剥掉省级前缀之后的写法：宽松键就是这么建的，而「江西省南昌县人民医院」
+    # 带着前缀根本匹不上 LOOSE_DIVISION_RE，这道闸门会整个失效，
+    # 把「南昌市人民医院」放进「南昌县人民医院」。
+    target_name = strip_province_prefix(record) or str(record.get("n") or "")
+    target = LOOSE_DIVISION_RE.match(target_name)
     if not query or not target:
         return False
     if query.group(1) != target.group(1) or query.group(2) == target.group(2):
@@ -177,9 +212,18 @@ class HospitalIndex:
                 # 宽松键与精确键相同的记录也要入宽松索引：更名归一是**双向**的，
                 # 公告写新名（赣南医科大学…）、索引留旧名（赣南医学院…）时，
                 # 被查的正是那条「本来就是规范写法」的记录。漏掉它等于兜底键形同虚设。
-                relaxed = loose_key(record.get("n"))
-                if len(relaxed) >= 4:
-                    self.loose[relaxed].append((index, "name"))
+                relaxed_keys = {loose_key(record.get("n"))}
+                # 省名写进了机构名的记录，再按剥掉前缀的写法登记一个宽松键，
+                # 否则公告里的「宜城市中医医院」永远够不到「湖北省宜城市中医医院」。
+                # 只入 loose 不入 exact：兜底键仅在精确键全无命中时才查，
+                # 顶不掉任何一个已有的确定性匹配，撞车照旧被判歧义置空。
+                stripped = strip_province_prefix(record)
+                stripped_key = normalize(stripped)
+                if len(stripped_key) >= 4 and not is_generic_org_name(stripped_key):
+                    relaxed_keys.add(loose_key(stripped))
+                for relaxed in relaxed_keys:
+                    if len(relaxed) >= 4:
+                        self.loose[relaxed].append((index, "name"))
             for alias in alias_variants(record.get("a")):
                 alias_key = normalize(alias)
                 if len(alias_key) >= 4:
