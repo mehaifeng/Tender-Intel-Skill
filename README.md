@@ -32,12 +32,14 @@
 | `scripts/tender_identity.py` | 全流程共用公告身份规则 |
 | `scripts/tender_ledger.py` | 飞书台账拉取、运行快照与快照锁 |
 | `scripts/feishu_client.py` | 飞书多维表格开放接口客户端 |
+| `references/feishu_app.md` | 飞书应用权限、协作者授权与接口实测结果 |
 | `scripts/dedup_match.py` | 分层查重漏斗：强身份 / 字符级 / 正文 / 语义 |
 | `references/dedup.md` | 去重设计、发送防重与升级约定 |
 | `scripts/hospital_match.py` | 医院名称、别名、等级的本地确定性匹配 |
 | `scripts/send_record.py` | 载荷 DryRun 与生产写入门禁 |
 | `scripts/send_record.ps1` | Windows兼容发送入口 |
 | `scripts/run_report.py` | 运行报告：只读取运行数据，生成单轮漏斗 HTML 与两轮归宿 diff |
+| `scripts/feedback_stats.py` | 台账反馈统计：近 N 天窗口 + 全表累计，写 JSON 供运行报告渲染 |
 | `data/hospitals.min.json.gz` | 50,601家医疗单位精简运行索引 |
 
 ## 配置
@@ -45,7 +47,7 @@
 默认分发包不含凭据。仅使用 `scripts/build_package.py --include-secrets` 生成的本机包包含
 `config/zlbx.json` 与 `config/feishu_app.json`；这两份文件含明文凭据，已被 Git 忽略，不得公开分享。
 
-知了标讯 API Key 按环境变量`ZLBX_API_KEY` → `config/zlbx.json`的`api_key`顺序读取，模板见`config/zlbx.example.json`；该文件含凭据，已被Git忽略。Key没有到期机制，不需要定期换发。检索按调用次数计费，72h日窗一轮约25积分（列表）加每条取详情的候选1积分；2026-09-08 实跑 113 积分/轮，约¥226/月，实测明细见`references/zlbx.md`。详情里既有通过标题/标的物预筛的候选，也有「标的物是检验仪器或试剂、或医疗机构买耗材器械，而品类信号只可能在正文里」的复核批（不设条数上限，见 zlbx.md「正文里才有的信号」）。适配器把每词命中数记在`data/query_hits.json`用于装箱降低调用次数，首次运行没有该文件时会多花约一倍列表调用。飞书自建应用凭据与目标多维表格按环境变量`FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_APP_TOKEN`/`FEISHU_TABLE_ID` → `config/feishu_app.json`的顺序读取，模板见`config/feishu_app.example.json`。应用需开通`bitable:app`，并在目标多维表格里通过「添加文档应用」加为协作者。
+知了标讯 API Key 按环境变量`ZLBX_API_KEY` → `config/zlbx.json`的`api_key`顺序读取，模板见`config/zlbx.example.json`；该文件含凭据，已被Git忽略。Key没有到期机制，不需要定期换发。检索按调用次数计费，72h日窗一轮约25积分（列表）加每条取详情的候选1积分；2026-09-08 实跑 113 积分/轮，约¥226/月，实测明细见`references/zlbx.md`。详情里既有通过标题/标的物预筛的候选，也有「标的物是检验仪器或试剂、或医疗机构买耗材器械，而品类信号只可能在正文里」的复核批（不设条数上限，见 zlbx.md「正文里才有的信号」）。适配器把每词命中数记在`data/query_hits.json`用于装箱降低调用次数，首次运行没有该文件时会多花约一倍列表调用。飞书自建应用凭据与目标多维表格按环境变量`FEISHU_APP_ID`/`FEISHU_APP_SECRET`/`FEISHU_APP_TOKEN`/`FEISHU_TABLE_ID` → `config/feishu_app.json`的顺序读取，模板见`config/feishu_app.example.json`。应用需开通`bitable:app`，并在目标多维表格里通过「添加文档应用」加为协作者；云空间读写还需`drive:drive`与机器人能力，权限清单、授权路径、错误码对照和接口实测结果见`references/feishu_app.md`。
 
 ## 运行
 

@@ -17,7 +17,8 @@ from datetime import datetime
 from pathlib import Path
 
 from dedup_match import LedgerMatcher
-from feishu_client import FeishuClient, FeishuError, FeishuWriteResultUnknown, cell_value
+from feishu_client import (TEXT, FeishuClient, FeishuError, FeishuWriteResultUnknown,
+                           cell_value)
 from tender_identity import remember_aliases
 from tender_ledger import LedgerError, fetch_ledger, ledger_lock, save_snapshot, to_record
 
@@ -32,6 +33,9 @@ FIELD_ALIASES = {"科室": "科室名称", "命中关键词": "关键词命中",
 # 表里区分来源与初始状态的两列，接口写入时没人填，发送器补上。
 # 「是否已推送」和两个时间戳归表格自身的工作流，发送器不碰。
 CONSTANT_FIELDS = {"标讯来源": "AI收集", "标讯状态": "新插入"}
+# 知了标讯的 bid_id 落到台账这一列。它不是 16 字段载荷的一部分，而是给跨轮去重用的
+# 稳定身份：`链接` 优先存原始站点 URL，换平台或医院重发就变了；bid_id 不会变。
+SOURCE_ID_FIELD = "标讯ID"
 PROVINCE_LEVEL_DIVISIONS = {
     "北京", "天津", "上海", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江",
     "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南",
@@ -135,11 +139,17 @@ def validate_payload(payload):
     return errors
 
 
-def build_fields(payload, schema):
-    """16字段载荷 -> 多维表格写入体。空值直接不传，不再往表里写字符串 null。"""
+def build_fields(payload, schema, extras=None):
+    """16字段载荷 -> 多维表格写入体。空值直接不传，不再往表里写字符串 null。
+
+    `extras` 是不属于 16 字段契约、但同样要写进表里的附加列（与 `CONSTANT_FIELDS`
+    同一条旁路）。载荷本身仍然是严格的 16 字段——`validate_payload` 只看 payload，
+    extras 不参与，所以契约不受影响。
+    """
     fields, dropped = {}, []
     values = {FIELD_ALIASES.get(k, k): v for k, v in payload.items()}
     values.update(CONSTANT_FIELDS)
+    values.update(extras or {})
     for name, raw in values.items():
         meta = schema.get(name)
         if meta is None:
@@ -155,6 +165,20 @@ def build_fields(payload, schema):
         if value is not None:
             fields[name] = value
     return fields, dropped
+
+
+def ensure_source_id_column(client):
+    """保证「标讯ID」列存在。已存在时 create_field 原样返回，不改类型也不报错。
+
+    **失败不阻断发送。** 这一列只服务跨轮去重，建不出来只是退回到改动前的行为；
+    为了一列辅助身份让一条真公告发不出去不划算。失败时 build_fields 会照常把它
+    记进 dropped_fields，留痕不静默。
+    """
+    try:
+        client.create_field(SOURCE_ID_FIELD, TEXT)
+        return True
+    except FeishuError:
+        return False
 
 
 def validate_manifest(manifest_path, payload_path, payload_sha256):
@@ -228,7 +252,13 @@ def send_once(manifest, candidate_id, payload_path, body, client=None):
                 + "；先用 tender_pipeline.py resolve-semantic 登记结论"
             )
 
-        fields, dropped = build_fields(payload, client.fields())
+        # 标讯ID 列按需创建，建不出来也不阻断发送。放在 fields() 之前：create_field
+        # 成功后会作废字段缓存，随后的 fields() 才看得到这一列。
+        source_id = str(candidate.get("bid_id") or "").strip()
+        if source_id:
+            ensure_source_id_column(client)
+        fields, dropped = build_fields(
+            payload, client.fields(), {SOURCE_ID_FIELD: source_id})
         try:
             created = client.create_record(fields)
         except FeishuWriteResultUnknown as exc:

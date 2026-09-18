@@ -11,6 +11,10 @@ from urllib.parse import urlsplit, parse_qs
 from search_common import canonical_url, title_fingerprint, title_is_truncated, notice_family, zlbx_bid_id
 
 REPOST_DAYS = 3
+# 标题逐字相同（同采购人、同轮次包号）时允许的跨度：同一个项目隔期重新挂一遍，
+# 链接会变、项目编号又常常是空的，不该被 3 天转载窗口挡在比较之外。上限对齐
+# dedup_match.PROJECT_NUMBER_DAYS——超过一个月，同名公告更可能是下一轮采购。
+EXACT_TITLE_DAYS = 30
 EMPTY = {"", "null", "none", "未知", "未公开", "未披露", "无"}
 
 
@@ -213,6 +217,18 @@ def duplicate_reason(a, b):
     if not a.published or not b.published:
         return ""
     gap = abs((date.fromisoformat(a.published) - date.fromisoformat(b.published)).days)
+    # 标题逐字相同、同采购人、同轮次包号的重发，不受 3 天转载窗口限制。
+    #
+    # 2026-09-18 回测：飞书台账行 411 与行 487 是广东医科大学附属医院同一条公告
+    # （标题里的编号 ZJZYHC202614 相同），间隔 7 天推了两次，销售两次都判无效。
+    # 两行标题相似度是 1.00，但日期差超过 REPOST_DAYS，下面那道日期门把**它和它
+    # 之后的所有分支**一起挡掉了——不是阈值不够宽，是比较根本没被触发。
+    # 只补窗口外那一档：窗口内的重发照旧走下面的分支，理由不变。
+    # 要求 ≥16 字是为了排除「医用耗材遴选公告」这类通用模板标题。
+    if (REPOST_DAYS < gap <= EXACT_TITLE_DAYS and a.fp and a.fp == b.fp
+            and len(a.fp) >= 16 and a.scope == b.scope
+            and a.buyer and a.buyer == b.buyer):
+        return "同采购人、标题完全一致的跨期重发"
     if gap > REPOST_DAYS or (a.phase == "更正" and gap):
         return ""
     if a.scope != b.scope and not (a.truncated or b.truncated):

@@ -1193,6 +1193,14 @@ def canonicalize_create(row, candidate):
             add_adjustment(row, "医院全名", record["医院全名"], "null", "医院库未匹配且无原文证据")
             record["医院全名"] = "null"
 
+    # 这一列要的是采购人全称本身，不是「在医院库里登记过的名字」：索引没命中、或者采购人
+    # 压根不是医院（疾控中心、卫健委、高校后勤）时留空，台账那列就长期空着。单位已经由
+    # 接口结构化字段绑定并核过证据，直接抄过去，医院等级仍只认索引唯一匹配的结果。
+    if record["单位"] != "null" and record["医院全名"] != record["单位"]:
+        add_adjustment(row, "医院全名", record["医院全名"], record["单位"], "医院全名一律取单位原名")
+        record["医院全名"] = record["单位"]
+        field_evidence["医院全名"] = field_evidence.get("单位") or f"取自单位字段：{record['单位']}"
+
     normalized_province = canonical_province(record["所属省/市"])
     if normalized_province == "null":
         normalized_province = canonical_province(record["地区"])

@@ -21,8 +21,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from difflib import SequenceMatcher
 
-from tender_identity import (REPOST_DAYS, IdentityIndex, fingerprint, identity,
-                             publish_date, text)
+from tender_identity import (EXACT_TITLE_DAYS, REPOST_DAYS, IdentityIndex,
+                             fingerprint, identity, publish_date, text)
 
 # 标题字符级相似度：高于上界直接判重，低于下界直接判新，中间带才继续。
 TITLE_HIGH = 0.90
@@ -292,9 +292,20 @@ class LedgerMatcher:
                         "硬门": gate,
                     })
                 continue
-            if gap is None or gap > REPOST_DAYS:
+            if gap is None:
+                continue
+            # 同采购人 + 标题几乎逐字相同（≥ TITLE_HIGH）时不受 3 天转载窗口限制，
+            # 理由同 tender_identity.EXACT_TITLE_DAYS：同一个项目隔期重发，链接换了、
+            # 项目编号又常常空着，若再被日期挡在比较之外就整层绕过。这一档补的是
+            # 标题不逐字相等、但相似度够高的重发（如医院重发时改了期数前缀）。
+            # 先过便宜的日期与采购人两道判断，再算相似度，不给整批台账行白算。
+            beyond_repost = gap > REPOST_DAYS
+            if beyond_repost and not (gap <= EXACT_TITLE_DAYS
+                                      and title_evidence_ok(a, b)):
                 continue
             title_sim = similarity(a.fp, b.fp)
+            if beyond_repost and title_sim < TITLE_HIGH:
+                continue
             if title_sim < TITLE_LOW:
                 continue
             candidate_content = candidate_body()[1]

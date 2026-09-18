@@ -16,8 +16,10 @@ from tender_ledger import (ledger_lock, fetch_ledger, save_snapshot, snapshot_pa
 from search_common import canonical_url, write_candidates, merge_source_dirs
 from tender_pipeline import (authorize_unattended, cluster_candidates, prepare, record_push,
                              canonicalize_create, resolve_semantic, PipelineError)
-from send_record import FIELDS, send_once, SendError, sha256_bytes, build_fields
+from send_record import (FIELDS, SOURCE_ID_FIELD, send_once, SendError, sha256_bytes,
+                         build_fields)
 from feishu_client import FeishuError, cell_value, date_text, epoch_ms
+from dedup_match import LedgerMatcher
 import fake_feishu
 from fake_feishu import FakeFeishu, ledger_row
 import zlbx_search
@@ -293,6 +295,41 @@ class DeliveryContractTests(unittest.TestCase):
         self.assertEqual(result["feishu_id"], "")
         state = record_push(self.root / "run", result["receipt"])
         self.assertEqual(state["push_counts"]["confirmed"], 1)
+
+    def test_source_id_is_written_and_dedups_across_platforms(self):
+        """知了 bid_id 落进台账独立列，下一轮换平台链接重发时靠它认出来。
+
+        这是「项目编号」那条路的替身：知了不返回 bid_no（实测 184 条样本 0 条非空），
+        但必定返回 bid_id。链接优先存原始站点 URL，换平台或医院重发就变了。
+        """
+        run = self.setup_run()
+        self.assertTrue(self.send(run)["sent"])
+        self.assertEqual(self.fake.created[0].get(SOURCE_ID_FIELD), "123")
+
+        # 回读：bid_id 要能从表里读回来，identity() 才认得出 `zlbx:123` 这个强身份。
+        ledger = fetch_ledger(self.client)
+        stored = [r for r in ledger["records"] if r.get("bid_id")]
+        self.assertEqual([r["bid_id"] for r in stored], ["123"])
+        self.assertIn("zlbx:123", identity(stored[0]).ids)
+
+        # 同一条知了标讯换了来源平台：链接不同、日期也不同，靠 bid_id 命中 L1。
+        mirror = {"标题": "甲医院过敏原试剂采购公告", "链接": "https://mirror.example.org/b",
+                  "单位": "甲医院", "发布时间": "2026-09-20", "内容": "",
+                  "项目编号": "", "bid_id": "123", "candidate_id": "C9"}
+        match = LedgerMatcher(ledger["records"]).check(mirror)
+        self.assertEqual((match.verdict, match.layer), ("duplicate", "L1"))
+
+    def test_source_id_column_is_created_when_the_table_lacks_it(self):
+        """表里还没有这一列时发送器自己建，值照写，不静默丢进 dropped_fields。"""
+        schema = {k: v for k, v in fake_feishu.SCHEMA.items() if k != SOURCE_ID_FIELD}
+        self.fake = FakeFeishu(schema=schema)          # setUp 里那个要换掉
+        self.client = fake_feishu.client(transport=self.fake)[0]
+        run = self.setup_run()
+        result = self.send(run)
+        self.assertTrue(result["sent"])
+        self.assertNotIn(SOURCE_ID_FIELD,
+                         [d["字段"] for d in result.get("dropped_fields") or []])
+        self.assertEqual(self.fake.created[0].get(SOURCE_ID_FIELD), "123")
 
     def test_two_prepared_runs_cannot_both_write(self):
         a = self.setup_run("a")

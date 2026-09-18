@@ -44,6 +44,7 @@ FILES = [
     "scripts/feishu_client.py",
     "scripts/dedup_match.py",
     "scripts/run_report.py",
+    "scripts/feedback_stats.py",
     "scripts/build_package.py",
     "config/zlbx.example.json",
     "config/feishu_app.example.json",
@@ -65,6 +66,7 @@ TEST_FILES = [
     "tests/test_dedup_contract.py",
     "tests/test_dedup_match.py",
     "tests/test_run_report.py",
+    "tests/test_feedback_stats.py",
     "tests/fake_feishu.py",
 ]
 SECRET_FILES = ["config/zlbx.json", "config/feishu_app.json"]

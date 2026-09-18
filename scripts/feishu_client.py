@@ -147,6 +147,25 @@ class FeishuClient:
             }
         return self._fields
 
+    def create_field(self, field_name, field_type, options=None):
+        """新增一列。已存在同名列时直接返回它，不报错也不改它的类型。
+
+        **加列是加列，不动已有列。** 改类型会让整列已有值按新类型重新解释，
+        那是人在表里该做的决定，不是脚本该替他做的。
+
+        `options` 只对单选（type 3）有意义，传选项名列表。
+        """
+        existing = self.fields().get(field_name)
+        if existing:
+            return existing
+        body = {"field_name": field_name, "type": field_type}
+        if options:
+            body["property"] = {"options": [{"name": name} for name in options]}
+        data = self._call("POST", self.table_path + "/fields", body=body, retries=0,
+                          uncertain_on_transport=True)
+        self._fields = None                   # 让下次 fields() 重新取
+        return data.get("field") or {}
+
     # ---- 读 ----
 
     def search_records(self, field_names=None, filter_=None, page_size=PAGE_SIZE):
@@ -187,6 +206,34 @@ class FeishuClient:
         data = self._call(
             "POST", self.table_path + "/records", body={"fields": fields}, retries=0,
             uncertain_on_transport=True,
+        )
+        return data.get("record") or {}
+
+    def update_record(self, record_id, fields):
+        """改已有行的若干列；没传的列不动。
+
+        招标线是 append 用不到它，中标线要 upsert——同一个标会依次发 中标候选人公示
+        → 中标结果公告 → 合同公告，内容递进，应该按同一行累积更新而不是堆三行
+        （Award-Intel-Skill/BRIEF.md 第 7 节）。
+
+        与 `create_record` 一样不自动重试：更新本身幂等，但结果未知时闷头重试会
+        掩盖「到底改没改成」，仍然交给调用方决定。
+        """
+        data = self._call(
+            "PUT", f"{self.table_path}/records/{quote(str(record_id))}",
+            body={"fields": fields}, retries=0, uncertain_on_transport=True,
+        )
+        return data.get("record") or {}
+
+    def delete_record(self, record_id):
+        """删一行。**调用方必须先把要删的行打印给人看过**——没有回收站。
+
+        存在的唯一理由是清理脚本自己写错写进去的行（闸门漏了、抽取错位）。
+        任何「按业务规则删」的需求都不该走这里，那是多维表格工作流的事。
+        """
+        data = self._call(
+            "DELETE", f"{self.table_path}/records/{quote(str(record_id))}",
+            retries=0, uncertain_on_transport=True,
         )
         return data.get("record") or {}
 

@@ -27,6 +27,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# feedback_stats.py 落在检索目录里的统计。本报告只读它，不自己拉台账——
+# 「不发任何请求」是这个脚本的承诺，加上它就得打破。
+FEEDBACK_NAME = "feedback_stats.json"
+
 # prepare() 里闸门的实际先后顺序。报告的漏斗必须跟它一致，否则「丢在哪一关」是错的。
 DROP_STAGES = [
     ("already_seen", "台账已入账"),
@@ -284,6 +288,9 @@ def collect(run_dir):
         "outcome": outcome,
         "push_rows": push_rows,
         "orphan_push": orphan_push,
+        # feedback_stats.py 的产物。缺件不报错——它与本报告是两步，可以只跑其中一步。
+        "feedback": (load_json(search_dir / FEEDBACK_NAME)
+                     if (search_dir / FEEDBACK_NAME).exists() else None),
     }
 
 
@@ -538,6 +545,18 @@ td.t a, td.t span.plain { font-weight: 500; }
 .grid div { border-top: 1px dashed var(--line); padding-top: 4px; }
 .grid k { display: block; color: var(--muted); font-size: 11px; }
 .empty { color: var(--muted); padding: 14px 16px; font-size: 13px; }
+/* 台账反馈统计：窗口/累计的数字沿用 .kpis，这里只补周趋势与无效原因两小块 */
+.weeks { margin-top: 14px; display: grid; gap: 5px; }
+.week { display: grid; grid-template-columns: 58px 1fr 104px; gap: 12px;
+  align-items: center; font-size: 12px; }
+.week .wk { color: var(--muted); font-variant-numeric: tabular-nums; }
+.week .wn { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.week .bar { height: 12px; }
+.fb-reasons { margin-top: 16px; display: grid; gap: 7px; }
+.fb-reason { display: grid; grid-template-columns: 1fr auto; gap: 14px; font-size: 13px;
+  border-top: 1px dashed var(--line); padding-top: 7px; }
+.fb-reason .meta { color: var(--muted); font-size: 12px; white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
 footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
 """
 
@@ -657,6 +676,95 @@ def page(title, body):
     ).format(title=esc(title), css=CSS, body=body, js=JS)
 
 
+def rate(value):
+    """已经算好的比率（0..1）-> 百分数文本。没有分母时给破折号，不假装是 0%。"""
+    return "—" if value is None else "{:.1f}%".format(value * 100)
+
+
+def clip(value, limit):
+    value = str(value or "")
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
+def feedback_html(feedback):
+    """台账反馈统计一节：近 N 天窗口 + 全表累计 + 周趋势 + 无效原因。
+
+    没有统计文件时给一句提示而不是悄悄跳过——「看不见」正是这一步要解决的问题。
+    """
+    if not feedback:
+        return ['<h2>台账反馈 · 近期与累计</h2>',
+                '<div class="empty">本轮没有生成反馈统计。先跑 '
+                '<code>python scripts/feedback_stats.py --run-dir &lt;检索目录&gt;</code>，'
+                '再重新生成一次本报告。</div>']
+
+    window = feedback.get("window") or {}
+    cumulative = feedback.get("cumulative") or {}
+    days = feedback.get("days") or 0
+    scope = text(feedback.get("scope")) or "AI收集"
+    invalid = window.get("invalid") or 0
+    kpis = [
+        ("近 {} 天推送".format(days), window.get("pushed", 0), ""),
+        ("已反馈", window.get("reviewed", 0), ""),
+        ("反馈覆盖率", rate(window.get("coverage")), ""),
+        ("窗口无效率", rate(window.get("invalid_rate")), "cold" if invalid else ""),
+        ("累计无效率", rate(cumulative.get("invalid_rate")), ""),
+    ]
+    notes = [
+        ("口径", scope + "（员工录入的行不计）"),
+        ("累计", "{} 条推送 / {} 条已反馈 / {} 条无效".format(
+            cumulative.get("pushed", 0), cumulative.get("reviewed", 0),
+            cumulative.get("invalid", 0))),
+        ("窗口", "{} ~ {}".format(text(window.get("start")), text(window.get("end")))),
+    ]
+    if feedback.get("undated"):
+        notes.append(("无日期", "{} 条既无推送时间也无插入时间，只进累计".format(
+            feedback["undated"])))
+
+    parts = ['<h2>台账反馈 · 近期与累计</h2>',
+             '<div class="kpis">{}</div>'.format(
+                 "".join('<div class="kpi {}"><b>{}</b><span>{}</span></div>'.format(
+                     cls, esc(value), esc(label)) for label, value, cls in kpis)),
+             '<div class="notes">{}</div>'.format(" · ".join(
+                 "{} {}".format(esc(k), esc(v)) for k, v in notes if v))]
+
+    weeks = [w for w in (feedback.get("weekly") or []) if w.get("week_start")]
+    if weeks:
+        peak = max([(w.get("valid") or 0) + (w.get("invalid") or 0) for w in weeks] or [0]) or 1
+        rows = []
+        for week in weeks:
+            valid, bad = week.get("valid") or 0, week.get("invalid") or 0
+            reviewed = valid + bad
+            bar = ('<div class="bar"></div>' if not reviewed else
+                   '<div class="bar"><i style="flex:{:.3f}"></i>'
+                   '<b style="flex:{:.3f}"></b></div>'.format(
+                       valid / peak * 100, bad / peak * 100))
+            # 空周照常画出来：跳过去会让「上周没推」看起来像「这周没问题」。
+            if reviewed:
+                label = "{} / {} 无效".format(reviewed, bad)
+            else:
+                label = "无推送" if not week.get("pushed") else "无反馈"
+            rows.append('<div class="week"><span class="wk">{}</span>{}'
+                        '<span class="wn">{}</span></div>'.format(
+                            esc(text(week.get("week_start"))[5:]), bar, esc(label)))
+        parts.append('<div class="weeks">{}</div>'.format("".join(rows)))
+        parts.append('<div class="notes">周趋势按 ISO 周（周一起），条长按周内已反馈数'
+                     '缩放；<span style="color:var(--drop)">红</span>为无效。</div>')
+
+    reasons = [r for r in (window.get("reasons") or []) if text(r.get("原因"))]
+    if reasons:
+        parts.append('<div class="notes">近 {} 天无效原因，按出现次数排、同次数按时间新'
+                     '的在前；原因多为各写各的自由文本，多数只出现一次。</div>'.format(days))
+        parts.append('<div class="fb-reasons">{}</div>'.format("".join(
+            '<div class="fb-reason"><span>{}</span><span class="meta">{} 条 · {} · {}</span>'
+            '</div>'.format(
+                esc(text(r.get("原因"))),
+                r.get("条数", 0),
+                esc(clip(text(r.get("单位")), 22) or "—"),
+                esc(text(r.get("最后一条"))))
+            for r in reasons)))
+    return parts
+
+
 def render_run(run):
     manifest, summary, counts = run["manifest"], run["summary"], run["counts"]
     run_id = text(manifest.get("run_id")) or run["search_dir"].name
@@ -714,6 +822,8 @@ def render_run(run):
     parts.append("<h2>本轮产出 · {} 条</h2>".format(len(created)))
     parts.append("".join(card_html(item) for item in created)
                  or '<div class="empty">本轮没有核实通过的候选。</div>')
+    # 台账反馈统计放在最后：它讲的是台账的长期质量，不是这一轮的漏斗。
+    parts.extend(feedback_html(run.get("feedback")))
     parts.append("<footer>生成于 {} · 数据全部来自 {} · 不改管线状态</footer>".format(
         esc(datetime.now().astimezone().isoformat(timespec="seconds")), esc(str(run["search_dir"]))))
     return page("运行报告 " + run_id, "".join(parts))

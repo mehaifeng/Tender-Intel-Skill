@@ -374,6 +374,22 @@ class SourceFieldBindingTests(unittest.TestCase):
         self.assertEqual(record["采购方式"], "邀请招标")
         self.assertTrue(any(a["field"] == "接口地理" for a in row["pipeline_adjustments"]))
 
+    def test_hospital_full_name_falls_back_to_the_buyer(self):
+        """采购人不在医院库里（这里是疾控中心），医院全名仍要拿到单位原名。"""
+        record, _ = self._run({
+            "单位": "云浮市疾病预防控制中心", "所属省/市": "广东", "地区": "云浮市",
+        }, title="某中心试剂采购公告")
+        self.assertEqual(record["医院全名"], "云浮市疾病预防控制中心")
+        self.assertEqual(record["医院等级"], "null")
+
+    def test_hospital_full_name_keeps_the_buyer_spelling_over_the_index(self):
+        """索引命中只负责等级：医院全名照抄单位，不改写成索引里的登记名。"""
+        record, _ = self._run({
+            "单位": "宜城市中医医院", "所属省/市": "湖北", "地区": "宜城市",
+        })
+        self.assertEqual(record["医院全名"], "宜城市中医医院")
+        self.assertEqual(record["医院等级"], "二级甲等")
+
     def test_aggregate_page_binds_nothing_from_the_interface(self):
         """真实样本：「【扫院行动】9月4日医院采购清单」曾被绑成单位=宁海县城关医院。
 
