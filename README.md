@@ -39,6 +39,7 @@
 | `scripts/send_record.py` | 载荷 DryRun 与生产写入门禁 |
 | `scripts/send_record.ps1` | Windows兼容发送入口 |
 | `scripts/run_report.py` | 运行报告：只读取运行数据，生成单轮漏斗 HTML 与两轮归宿 diff |
+| `scripts/feedback_stats.py` | 台账反馈统计：近 N 天窗口 + 全表累计，写 JSON 供运行报告渲染 |
 | `data/hospitals.min.json.gz` | 50,601家医疗单位精简运行索引 |
 
 ## 配置

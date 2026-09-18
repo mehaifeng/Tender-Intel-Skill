@@ -37,6 +37,9 @@ SCHEMA = {
     "标讯状态": {"type": SINGLE_SELECT, "options": ["新插入", "已跟进", "已关闭"]},
     # 知了标讯的 bid_id。不进 16 字段载荷，由发送器单独写入，供跨轮去重做稳定身份。
     "标讯ID": {"type": TEXT, "options": []},
+    # 销售反馈的两列，feedback_stats.py 读它们出统计。
+    "信息是否有效": {"type": SINGLE_SELECT, "options": ["有效", "无效/已过期"]},
+    "无效原因(信息无效时填写)": {"type": TEXT, "options": []},
     "是否已推送": {"type": CHECKBOX, "options": []},
     "插入表格的时间": {"type": DATETIME, "options": []},
     "推送时间": {"type": DATETIME, "options": []},
