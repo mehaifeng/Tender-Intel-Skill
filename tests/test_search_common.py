@@ -514,7 +514,7 @@ class MixedBundleScreeningTests(unittest.TestCase):
         ),
         (
             "国家康复辅具研究中心附属康复医院2026年医用耗材试剂遴选公告",
-            "白介素6(IL-6)测定试剂盒(化学发光免疫分析法),"
+            "抗核抗体IgG检测试剂盒(间接免疫荧光法),"
             "人乳头瘤病毒核酸分型检测试剂盒(PCR-荧光探针法)",
             "核酸",
         ),
@@ -537,17 +537,41 @@ class MixedBundleScreeningTests(unittest.TestCase):
         """正文写「详见附件/下载」时，清单只在来源自带的标的字段里。
 
         原型是国家康复辅具研究中心附属康复医院的耗材试剂遴选：正文只有一个「下载」，
-        `白介素6(IL-6)测定试剂盒` 只出现在来源的标的物清单字段里。该字段以 product_list
-        随候选落盘，统一层把它并进正文域，否则候选会以「无目标品类信号」二次丢失。
+        标的物清单只出现在来源的标的字段里。该字段以 product_list 随候选落盘，
+        统一层把它并进正文域，否则候选会以「无目标品类信号」二次丢失。
+
+        清单里放的是**核心组**试剂。原来这里用的是 `白介素6(IL-6)测定试剂盒`，但
+        2026-09-18 的销售反馈把那一行（飞书台账行 366）判成了无效——细胞因子独占
+        的候选现在会被 `CORROBORATION_ONLY_GROUPS` 拦在入队前，换核心组试剂才能
+        继续检验本条要保护的「清单单独携带信号」这件事。
         """
         body = "拟采购医用耗材试剂，其主要用途和要求如下：下载"
         title = "国家康复辅具研究中心附属康复医院2026年医用耗材试剂遴选公告"
         self.assertFalse(screen_domain(title, body)["keep"])
-        product_list = ("白介素6(IL-6)测定试剂盒(化学发光免疫分析法),"
+        product_list = ("抗核抗体IgG检测试剂盒(间接免疫荧光法),"
                         "人乳头瘤病毒核酸分型检测试剂盒(PCR-荧光探针法)")
         screen = screen_domain(title, "\n".join((body, product_list)))
         self.assertTrue(screen["keep"])
-        self.assertEqual(screen["signals"], ["细胞因子"])
+        self.assertIn("核抗体谱", screen["signals"])
+
+    def test_corroboration_only_group_needs_a_core_group(self):
+        """只命中「细胞因子」时不算目标品类，要核心组佐证才入队。
+
+        回测依据见 `search_common.CORROBORATION_ONLY_GROUPS`：全表 22 条细胞因子
+        独占记录里 18 条被销售判无效。信号必须照原样带回而不是返空——返空会让
+        `zlbx_search` 的 `weak = not keep and not signals` 把这条误判成「没信号」，
+        又送一次二次机会复核，白花取详情的积分。
+        """
+        title = "某医院检验科细胞因子十一项等耗材采购项目比选采购公告"
+        only_broad = screen_domain(title, "细胞因子11项耗材配送")
+        self.assertFalse(only_broad["keep"])
+        self.assertEqual(only_broad["signals"], ["细胞因子"])
+        self.assertIn("需核心组佐证", only_broad["reason"])
+
+        # 同一条公告里另有一行核心组试剂，即视为有佐证，照常入队。
+        corroborated = screen_domain(
+            title, "细胞因子11项耗材配送,抗核抗体IgG检测试剂盒(间接免疫荧光法)")
+        self.assertTrue(corroborated["keep"])
 
     def test_title_scope_exclusion_still_drops(self):
         """标题就说明了不是本司产品域的，照旧丢——这一层没有放宽。"""

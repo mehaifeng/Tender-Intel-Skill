@@ -16,10 +16,11 @@ from pathlib import Path
 from feishu_client import FeishuClient, FeishuError, cell_text, date_text
 
 SNAPSHOT_NAME = "ledger_snapshot.json"
-SCHEMA_VERSION = 4
-# 只拉判重要用的字段：内容用于正文语义比对，标讯来源用于区分 AI 收集与人工录入。
+SCHEMA_VERSION = 5
+# 只拉判重要用的字段：内容用于正文语义比对，标讯来源用于区分 AI 收集与人工录入，
+# 标讯ID（知了的 bid_id）是跨轮去重的稳定身份——链接换平台就变了，它不会。
 LEDGER_FIELDS = ["编号", "标题", "项目编号", "单位", "医院全名", "所属省/市",
-                 "地区", "发布时间", "链接", "内容", "标讯来源"]
+                 "地区", "发布时间", "链接", "内容", "标讯来源", "标讯ID"]
 
 
 class LedgerError(Exception):
@@ -73,6 +74,9 @@ def to_record(item):
     record["_feishu_id"] = cell_text(fields.get("编号"))
     record["_record_id"] = item.get("record_id", "")
     record["_feishu_source"] = cell_text(fields.get("标讯来源"))
+    # 知了的 bid_id。tender_identity.identity() 见到它就加成 `zlbx:<id>` 强身份，
+    # 而那条分支在日期门之前返回，所以同一个标讯换平台重发也认得出。
+    record["bid_id"] = cell_text(fields.get("标讯ID"))
     record["_pushed"] = True
     return record
 

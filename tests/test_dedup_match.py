@@ -53,6 +53,40 @@ class FunnelLayerTests(unittest.TestCase):
         match = self.check(rows, candidate(项目编号="P2"))
         self.assertEqual(match.verdict, "new")
 
+    # ---- 跨期重发：同一个项目隔了一周重新挂一遍 ----
+
+    # 原型是飞书台账行 411 与行 487：广东医科大学附属医院同一条公告，标题逐字相同
+    # （都带编号 ZJZYHC202614），医院重发时换了一篇文章（…/29724.htm → …/29754.htm），
+    # 间隔 7 天推了两次，销售两次都判无效。项目编号列是空的，链接又不同，三层里
+    # 只剩标题这一条路——而它原本被 3 天转载窗口挡在比较之外。
+    REPOST = dict(标题="专机专用耗材咨询遴选邀请公告(编号ZJZYHC202614)",
+                  单位="广东医科大学附属医院", 项目编号="")
+
+    def test_exact_title_repost_after_a_week_is_duplicate(self):
+        match = self.check([ledger(**self.REPOST, 链接="https://h.org/29724.htm",
+                                   发布时间="2026-09-09")],
+                           candidate(**self.REPOST, 链接="https://h.org/29754.htm",
+                                     发布时间="2026-09-16"))
+        self.assertEqual((match.verdict, match.layer), ("duplicate", "L1"))
+        self.assertIn("重发", match.reason)
+
+    def test_exact_title_beyond_the_window_is_a_new_round(self):
+        """超过 EXACT_TITLE_DAYS 的同名公告当下一轮采购，不合并。"""
+        match = self.check([ledger(**self.REPOST, 链接="https://h.org/29724.htm",
+                                   发布时间="2026-06-01")],
+                           candidate(**self.REPOST, 链接="https://h.org/29754.htm",
+                                     发布时间="2026-09-16"))
+        self.assertEqual(match.verdict, "new")
+
+    def test_exact_title_never_merges_across_buyers(self):
+        """没有采购人佐证的通用标题不能跨医院判重。"""
+        rows = [ledger(标题=self.REPOST["标题"], 单位="乙医院", 项目编号="",
+                       链接="https://h.org/29724.htm", 发布时间="2026-09-09")]
+        match = self.check(rows, candidate(**self.REPOST,
+                                           链接="https://h.org/29754.htm",
+                                           发布时间="2026-09-16"))
+        self.assertNotEqual(match.verdict, "duplicate")
+
     # ---- L1 后续阶段：同一招标已推给销售，更正不再推 ----
 
     def base(self, 标题="甲医院过敏原检测试剂采购项目公开招标公告", **kw):

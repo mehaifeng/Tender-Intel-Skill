@@ -35,6 +35,8 @@ SCHEMA = {
     "医院等级": {"type": TEXT, "options": []},
     "标讯来源": {"type": SINGLE_SELECT, "options": ["AI收集", "大区员工录入", "总部员工录入"]},
     "标讯状态": {"type": SINGLE_SELECT, "options": ["新插入", "已跟进", "已关闭"]},
+    # 知了标讯的 bid_id。不进 16 字段载荷，由发送器单独写入，供跨轮去重做稳定身份。
+    "标讯ID": {"type": TEXT, "options": []},
     "是否已推送": {"type": CHECKBOX, "options": []},
     "插入表格的时间": {"type": DATETIME, "options": []},
     "推送时间": {"type": DATETIME, "options": []},
@@ -91,6 +93,16 @@ class FakeFeishu:
         if path.endswith("/tenant_access_token/internal"):
             return _Response({"code": 0, "tenant_access_token": "t-test", "expire": 7200})
         if path.endswith("/fields"):
+            if request.get_method() == "POST":
+                # 建列：已存在同名时按真实接口的语义原样返回，不改类型。
+                name = str(body.get("field_name") or "")
+                self.schema.setdefault(name, {
+                    "type": body.get("type", TEXT),
+                    "options": [o.get("name") for o in
+                                ((body.get("property") or {}).get("options") or [])]})
+                return _Response({"code": 0, "data": {"field": {
+                    "field_name": name, "field_id": "fld" + name,
+                    "type": self.schema[name]["type"]}}})
             return _Response({"code": 0, "data": {"items": [
                 {"field_name": name, "field_id": "fld" + name, "type": meta["type"],
                  "property": {"options": [{"name": o} for o in meta["options"]]}}
